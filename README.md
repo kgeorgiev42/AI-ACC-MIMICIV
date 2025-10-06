@@ -67,4 +67,4 @@ _See [CONTRIBUTING.md](./CONTRIBUTING.md) for detailed guidance._
 
 ### Contact and enquiries
 
-Konstantin Georgiev [Konstantin.Georgiev@ed.ac.uk](Konstantin.Georgiev@ed.ac.uk): Insitute of Neuroscience and Cardiovascular Research (University of Edinburgh)
+Konstantin Georgiev ([Konstantin.Georgiev@ed.ac.uk](Konstantin.Georgiev@ed.ac.uk)): Insitute of Neuroscience and Cardiovascular Research (University of Edinburgh)
