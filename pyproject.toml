@@ -1,0 +1,71 @@
+[tool.poetry]
+name = "AI-ACC-MIMICIV"
+version = "1.0.0"
+description = "Codebase for Multimodal Fusion for prediction of acute cardiac conditions on MIMIC-IV dataset"
+authors = ["Konstantin Georgiev <k.s.georgiev@sms.ed.ac.uk>"]
+readme = "README.md"
+package-mode = false
+
+[tool.poetry.dependencies]
+python = ">=3.10,<3.12"
+numpy = "^1.26.4"
+matplotlib = "^3.8.3"
+scikit-learn = "^1.5.0"
+seaborn = "^0.13.2"
+ipykernel = "^6.29.3"
+pre-commit = "^3.7.0"
+tqdm = "^4.66.3"
+toml = "^0.10.2"
+ruff = "^0.3.5"
+polars = "^0.20.23"
+wandb = "^0.17.0"
+shap = "^0.47.1"
+fairlearn = "^0.12.0"
+transformers = "^4.42.1"
+en-core-sci-md = {url = "https://s3-us-west-2.amazonaws.com/ai2-s2-scispacy/releases/v0.5.4/en_core_sci_md-0.5.4.tar.gz"}
+spacy = "3.7.5"
+# Remove source for CPU support
+torch = {version = "^2.5.1", source = "pytorch-gpu"}
+torchvision = {version = "^0.20.1", source = "pytorch-gpu"}
+lightning = "^2.5.0.post0"
+tableone = "^0.9.1"
+pyarrow = "^19.0.1"
+pandas = "^2.2.3"
+statannotations = "^0.7.1"
+confidenceinterval = "^1.0.5"
+
+[tool.poetry.group.dev.dependencies]
+deptry = "^0.16.1"
+
+[tool.poetry.group.docs.dependencies]
+mkdocs = "^1.6.0"
+mkdocs-material = "^9.5.27"
+pymdown-extensions = "^10.8.1"
+mkdocs-gen-files = "^0.5.0"
+mkdocs-autorefs = "^1.0.1"
+mkdocstrings = {extras = ["python"], version = "^0.25.1"}
+
+# Remove source for CPU-only support for PyTorch
+[[tool.poetry.source]]
+name = "pytorch-gpu"
+url = "https://download.pytorch.org/whl/cu121"
+priority = "explicit"
+
+[tool.ruff]
+target-version = "py310"
+
+[tool.ruff.lint]
+extend-select = [
+    "I",  # isort
+    "UP", # pyupgrade
+    "PL", # pylint
+    "B"]
+
+ignore = [
+    "E501", # too many lines
+    "PLR0913", # too many arguments in function
+    ]
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"

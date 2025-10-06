@@ -1,0 +1,96 @@
+site_name: AI-ACC-MIMICIV
+site_description: Codebase for Multimodal Fusion for prediction of acute cardiac conditions on MIMIC-IV dataset
+repo_url: https://github.com/kgeorgiev42/AI-ACC-MIMICIV
+repo_name: kgeorgiev42/AI-ACC-MIMICIV
+edit_uri: edit/main/docs/
+
+nav:
+    - Home: index.md
+    - User Guide:
+        - Getting Started: getting_started.md
+        # - Data Curation: data_curation.md
+    - Code Reference:
+        - MIMIC-IV: mimiciv.md
+        - Data Exploration: exploration.md
+        - Preprocessing: preprocessing.md
+        - Multimodal learning objects: mm_learn.md
+        - Multimodal evaluation: eval_utils.md
+        - Fairness: fairness_utils.md
+        - Explainability: shap_utils.md
+        - Miscellaneous: functions.md
+
+theme:
+  logo: assets/NHS.svg
+  favicon: assets/NHS.svg
+  name: material
+  palette:
+
+    # Palette toggle for light mode
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: blue
+      accent: light blue
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+
+    # Palette toggle for dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: blue
+      accent: light blue
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+
+  features:
+    - navigation.instant
+    - navigation.tracking
+    - navigation.tabs
+    - navigation.tabs.sticky
+    - toc.integrate
+    - navigation.top
+    - search.suggest
+    - search.highlight
+    - search.share
+    - navigation.footer
+    - content.action.view
+    - content.action.edit
+    - content.code.copy
+  icon:
+    edit: material/pencil
+    view: material/eye
+
+extra_css:
+  - css/style.css
+  - css/mkdocstrings.css
+
+plugins:
+  - search
+  - autorefs
+  - mkdocstrings
+  # - gen-files:
+  #     scripts:
+  #       - docs/scripts/gen_ref_pages.py
+  # - literate-nav:
+  #     nav_file: SUMMARY.md
+  # - section-index
+  # - mkdocstrings:
+  #     default_handler: python
+  #     handlers:
+  #       python:
+  #         paths: [src]
+  # - git-revision-date-localized:
+  #     fallback_to_build_date: true
+
+markdown_extensions:
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.superfences
+
+extra:
+  generator: false

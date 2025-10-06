@@ -1,0 +1,14 @@
+[model]
+fusion_method = 'None'
+st_first = true
+
+[data]
+batch_size = 16
+num_workers = 0
+modalities = ['timeseries']
+
+[train]
+epochs = 60
+learning_rate = 1e-3
+early_stopping = 15
+adv_lambda = 0.0
