@@ -38,7 +38,7 @@ The MIMIC-IV dataset (v3.1) can be downloaded from [PhysioNet.org](https://physi
 - _hosp_: measurements recorded during hospital stay for training, including demographics, lab tests, prescriptions, diagnoses and care provider orders
 - _ed_: records metadata during ED attendance in an externally linked database
 - _icu_: records individuals with associated ICU admission during the episode with additional metadata (used mainly for measuring the ICU admission outcome)
-- _note_: records deidentified discharge summaries as long form narratives which describe reason for admission and relevant hospital events
+- _ecg_: 12-lead diagnostic electrocardiograms as waveform data to be linked to relevant emergency attendances
 
 Additional linked datasets may include [MIMIC-IV-ED](https://physionet.org/content/mimic-iv-ed/2.2/) (v2.2), [MIMIC-IV-ECG](https://physionet.org/content/mimic-iv-ecg/1.0/) (v1.0) and [MIMIC-CXR](https://physionet.org/content/mimic-cxr/2.1.0/) (v2.1.0). Further information can be found in PhysioNet's [documentation](https://mimic.mit.edu/).
 
@@ -67,4 +67,4 @@ _See [CONTRIBUTING.md](./CONTRIBUTING.md) for detailed guidance._
 
 ### Contact and enquiries
 
-Konstantin Georgiev ([Konstantin.Georgiev@ed.ac.uk](Konstantin.Georgiev@ed.ac.uk)): Institute of Neuroscience and Cardiovascular Research, University of Edinburgh
+**Konstantin Georgiev** ([Konstantin.Georgiev@ed.ac.uk](Konstantin.Georgiev@ed.ac.uk)): Institute of Neuroscience and Cardiovascular Research, University of Edinburgh
