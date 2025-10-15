@@ -74,8 +74,8 @@ def impute_from_df(
     return impute_to
 
 
-def get_first_episodes(stays: pl.DataFrame | pl.LazyFrame) -> pl.DataFrame:
-    """Extracts the first ED episode with hospitalisation for creating a unique patient cohort.
+def get_final_episodes(stays: pl.DataFrame | pl.LazyFrame) -> pl.DataFrame:
+    """Extracts the final ED episode with hospitalisation for creating a unique patient cohort.
 
     Args:
         stays (pl.DataFrame): Stays data.
@@ -86,27 +86,28 @@ def get_first_episodes(stays: pl.DataFrame | pl.LazyFrame) -> pl.DataFrame:
     if isinstance(stays, pl.LazyFrame):
         stays = stays.collect()
 
-    ### Sort values and get first ED episode
-    stays_first = stays.sort(["subject_id", "edregtime"]).unique(
-        subset=["subject_id"], keep="first"
+    ### Sort values and get final ED episode
+    ### Save second to last episode for validation
+    stays_final = stays.sort(["subject_id", "edregtime"]).unique(
+        subset=["subject_id"], keep="last"
     )
-    ### Get second episode for time-series collection
-    stays_second = stays.sort(["subject_id", "edregtime"]).filter(
-        ~pl.col("hadm_id").is_in(stays_first["hadm_id"])
+    ### Get second-to-last episode for time-series collection
+    stays_second_last = stays.sort(["subject_id", "edregtime"]).filter(
+        ~pl.col("hadm_id").is_in(stays_final["hadm_id"])
     )
-    stays_second = stays_second.sort(["subject_id", "edregtime"]).unique(
-        subset=["subject_id"], keep="first"
+    stays_second_last = stays_second_last.sort(["subject_id", "edregtime"]).unique(
+        subset=["subject_id"], keep="last"
     )
-    stays_second = stays_second.rename(
-        {"edregtime": "next_edregtime", "dischtime": "next_dischtime"}
-    ).select(["subject_id", "next_edregtime", "next_dischtime"])
-    stays_final = stays_final.join(stays_second, on="subject_id", how="left")
-    ## Drop NAs in next_dischtime or next_edregtime
+    stays_second_last = stays_second_last.rename(
+        {"edregtime": "prev_edregtime", "dischtime": "prev_dischtime"}
+    ).select(["subject_id", "prev_edregtime", "prev_dischtime"])
+    stays_final = stays_final.join(stays_second_last, on="subject_id", how="left")
+    ## Drop NAs in prev_dischtime or prev_edregtime
     stays_final = stays_final.filter(
-        ~pl.col("next_dischtime").is_null() & ~pl.col("next_edregtime").is_null()
+        ~pl.col("prev_dischtime").is_null() & ~pl.col("prev_edregtime").is_null()
     )
     ## Drop any overlapping episodes
-    stays_final = stays_final.filter(pl.col("edregtime") < pl.col("next_edregtime"))
+    stays_final = stays_final.filter(pl.col("edregtime") > pl.col("prev_dischtime"))
 
     return stays_final
 

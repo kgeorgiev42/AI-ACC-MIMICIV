@@ -13,7 +13,7 @@ from utils.functions import (
     get_final_episodes,
     get_n_unique_values,
 )
-from utils.preprocessing import get_ltc_features, preproc_icd_module, clean_vitals
+from utils.preprocessing import get_diag_features, get_ltc_features, preproc_icd_module, clean_vitals
 
 warnings.filterwarnings("ignore", category=pl.exceptions.MapWithoutReturnDtypeWarning)
 
@@ -52,6 +52,18 @@ if __name__ == "__main__":
         type=str,
         help="JSON file containing mapping for long-term conditions in ICD-10 format.",
         default="../config/ltc_mapping.json",
+    )
+    parser.add_argument(
+        "--outcome_mapping",
+        type=str,
+        help="JSON file containing mapping for long-term conditions in ICD-10 format.",
+        default="../config/outcome_mapping.json",
+    )
+    parser.add_argument(
+        "--proc_mapping",
+        type=str,
+        help="JSON file containing mapping for long-term conditions in ICD-10 format.",
+        default="../config/proc_mapping.json",
     )
     parser.add_argument(
         "--verbose",
@@ -123,7 +135,7 @@ if __name__ == "__main__":
         mimic4_ecg_path, admits, use_lazy=args.lazy, verbose=args.verbose
     )
 
-    admits_first = get_final_episodes(admits)
+    admits_last = get_final_episodes(admits)
 
     ### Optional random sampling to understample subjects
     # sample n subjects (can be used to test/speed up processing)
@@ -140,7 +152,7 @@ if __name__ == "__main__":
 
     # Process long-term conditions
     diagnoses = m4c.read_diagnoses_table(
-        mimic4_path, admits_icu, admits_last, use_lazy=args.lazy, verbose=args.verbose
+        mimic4_path, admits, admits_last, use_lazy=args.lazy, verbose=args.verbose
     )
     if args.verbose:
         print(
@@ -155,6 +167,35 @@ if __name__ == "__main__":
     )
     admits_last = get_ltc_features(
         admits_last, diagnoses, ltc_dict_path=args.ltc_mapping, use_lazy=args.lazy
+    )
+
+    # Process procedure history
+    admits_last = m4c.read_procedures_table(
+        mimic4_path, admits, admits_last, proc_dict_path=args.proc_mapping,
+        use_lazy=args.lazy, verbose=args.verbose
+    )
+    if args.verbose:
+        print(f"Unique patients with prior revascularization procedures: {admits_last.filter(pl.col('prev_revasc')==1).select(pl.col('subject_id').n_unique()).to_series()[0]}")
+
+    # Process target outcomes
+    outcomes = m4c.read_outcomes_table(
+        mimic4_path, admits_last, use_lazy=args.lazy
+    )
+    if args.verbose:
+        print(
+            f"OUTCOMES:\n\tUnique ICD-10 conditions in current episodes: {get_n_unique_values(outcomes, 'hadm_id')}\n\tSUBJECT_IDs: {get_n_unique_values(outcomes)}"
+        )
+    outcomes = preproc_icd_module(
+        outcomes,
+        icd_map_path=args.icd9_to_icd10,
+        cond_dict_path=args.outcome_mapping,
+        outcomes=True,
+        verbose=args.verbose,
+        use_lazy=args.lazy,
+    )
+    admits_last = get_diag_features(
+        admits_last, outcomes, cond_dict_path=args.outcome_mapping,
+        outcomes=True, use_mm=False, use_lazy=args.lazy
     )
 
     if args.verbose:

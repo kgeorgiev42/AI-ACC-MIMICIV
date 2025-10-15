@@ -1,3 +1,4 @@
+import json
 import os
 
 import numpy as np
@@ -104,8 +105,8 @@ def read_admissions_table(
     ### Get ED attendance metadata
     ed_stays = pl.read_csv(
         os.path.join(mimic4_path, "edstays.csv.gz"),
-        columns=['subject_id', 'hadm_id', 'intime', 'arrival_transport', 'disposition'],
-        dtypes=[pl.Int64, pl.Int64, pl.Datetime, pl.String, pl.String],
+        columns=['subject_id', 'hadm_id', 'stay_id', 'intime', 'arrival_transport', 'disposition'],
+        dtypes=[pl.Int64, pl.Int64, pl.Int64, pl.Datetime, pl.String, pl.String],
         try_parse_dates=True,
     )
     ed_stays = ed_stays.filter(pl.col("disposition") == "ADMITTED")
@@ -224,8 +225,8 @@ def read_icu_table(
     """
     icu = pl.read_csv(
         os.path.join(mimic4_ed_path, "icustays.csv.gz"),
-        columns=["subject_id", "hadm_id", "intime", "outtime", "los"],
-        dtypes=[pl.Int64, pl.Int64, pl.Datetime, pl.Datetime, pl.Float32],
+        columns=["subject_id", "hadm_id", "stay_id", "intime", "outtime", "los"],
+        dtypes=[pl.Int64, pl.Int64, pl.Int64, pl.Datetime, pl.Datetime, pl.Float32],
         try_parse_dates=True,
     )
 
@@ -275,11 +276,12 @@ def read_icu_table(
     print("Collected ICU stay outcomes..")
     return icu_eps.lazy() if use_lazy else icu_eps
 
+
 def read_ecg_measurements(
     mimic4_ecg_path: str,
+    mimic4_ed_path: str,
     admissions_data: pl.DataFrame | pl.LazyFrame,
     use_lazy: bool = False,
-    verbose: bool = True,
 ) -> pl.LazyFrame | pl.DataFrame:
     """
     Read and preprocess the ECG measurements table from MIMIC-IV and join with admissions.
@@ -300,6 +302,12 @@ def read_ecg_measurements(
         dtypes=[pl.Int64, pl.Int64, pl.Int64, pl.Datetime, pl.String, pl.String, pl.Int64,
                 pl.Int64, pl.Int64, pl.Int64, pl.Int64, pl.Int64, pl.Int64, pl.Int64],
         try_parse_dates=True,
+    )
+
+    edmd_measures = pl.read_csv(
+        os.path.join(mimic4_ed_path, "triage.csv.gz"),
+        columns=["subject_id", "stay_id", "chiefcomplaint"],
+        dtypes=[pl.Int64, pl.Int64, pl.String],
     )
 
     if isinstance(admissions_data, pl.LazyFrame):
@@ -351,9 +359,31 @@ def read_ecg_measurements(
     ecg_measures['p_axis'] = ecg_measures['p_axis'].apply(lambda x: np.nan if x < -90 or x > 270 else x)
     ecg_measures['qrs_axis'] = ecg_measures['qrs_axis'].apply(lambda x: np.nan if x < -90 or x > 270 else x)
     ecg_measures['t_axis'] = ecg_measures['t_axis'].apply(lambda x: np.nan if x < -90 or x > 270 else x)
-    # Diagnostics
-    ecg_measures['sinus_rhythm'] = ecg_measures['rhythm'].apply(lambda x: 1 if pd.notna(x) and 'sinus rhythm' in x.lower() else 0)
-    ecg_measures['sinus_rhythm'].value_counts()
+    ## Diagnostics
+    # Create full_report by merging all report columns (report_0 to report_17)
+    report_cols = [f'report_{i}' for i in range(18)]  # report_0 to report_17
+    existing_report_cols = [col for col in report_cols if col in ecg_measures.columns]
+
+    print(f"Found report columns: {existing_report_cols}")
+
+    # Fill NaN values with empty string before concatenation
+    ecg_measures[existing_report_cols] = ecg_measures[existing_report_cols].fillna('')
+
+    # Concatenate all report columns with space separator
+    ecg_measures['full_report'] = ecg_measures[existing_report_cols].apply(
+        lambda row: ' '.join(row.values), axis=1
+    )
+
+    # Clean up the full_report text
+    ecg_measures['full_report'] = ecg_measures['full_report'].str.replace('\n', ' ').str.replace('\r', ' ')
+    ecg_measures['full_report'] = ecg_measures['full_report'].str.replace('  ', ' ')
+    ecg_measures['full_report'] = ecg_measures['full_report'].str.strip()
+    ecg_measures['full_report'] = ecg_measures['full_report'].str.lower()
+
+    # Create clinical indicators from the full report
+    ecg_measures['normal'] = ecg_measures['full_report'].apply(lambda x: 1 if pd.notna(x) and ('sinus rhythm' in x or 'sinus tachycardia' in x or 'sinus bradycardia' in x) and not 'abnormal ecg' in x else 0)
+    ecg_measures['st-elevation'] = ecg_measures['full_report'].apply(lambda x: 1 if pd.notna(x) and 'elevat' in x else 0)
+    ecg_measures['myocardial_ischemia'] = ecg_measures['full_report'].apply(lambda x: 1 if pd.notna(x) and 'ischemia' in x else 0)
 
     # Merge with admissions data to filter relevant ECGs
     ecg_admits = admissions_data.join(ecg_measures, on="subject_id", how="left")
@@ -364,6 +394,26 @@ def read_ecg_measurements(
     ecg_admits = ecg_admits.filter(
         (ecg_admits['ecg_time'] >= ecg_admits['edregtime']) & (ecg_admits['ecg_time'] <= ecg_admits['edregtime'] + pd.Timedelta(hours=3))
     )
+    # Get presenting complaint
+    edmd_measures = edmd_measures.filter(
+        pl.col("subject_id").is_in(ecg_admits.select("subject_id"))
+        & pl.col("hadm_id").is_in(ecg_admits.select("hadm_id"))
+        & pl.col("stay_id").is_in(ecg_admits.select("stay_id"))
+    )
+    # Define a regex pattern to capture variations of chest pain, dyspnea, and palpitations
+    symptoms_pattern = r'(chest[\s-]*pain|dyspnea|dysnea|shortness[\s-]*of[\s-]*breath|palpitation|palpitations|chest[\s-]*tightness|angina pectoris)'
+    stay_ids_symp = edmd_measures[edmd_measures['chiefcomplaint'].str.contains(symptoms_pattern, case=False, na=False, regex=True)]['stay_id'].unique()
+    chest_pain_pattern = r'(chest[\s-]*pain|chest[\s-]*tightness|angina pectoris)'
+    stay_ids_chest = edmd_measures[edmd_measures['chiefcomplaint'].str.contains(chest_pain_pattern, case=False, na=False, regex=True)]['stay_id'].unique()
+    dyspnea_pattern = r'(dyspnea|dysnea|shortness[\s-]*of[\s-]*breath)'
+    stay_ids_dysp = edmd_measures[edmd_measures['chiefcomplaint'].str.contains(dyspnea_pattern, case=False, na=False, regex=True)]['stay_id'].unique()
+    palpitations_pattern = r'(palpitation|palpitations)'
+    stay_ids_palp = edmd_measures[edmd_measures['chiefcomplaint'].str.contains(palpitations_pattern, case=False, na=False, regex=True)]['stay_id'].unique()
+
+    ecg_admits['suggestive_symptoms'] = ecg_admits['ed_stay_id'].isin(stay_ids_symp).astype(int)
+    ecg_admits['chest_pain'] = ecg_admits['ed_stay_id'].isin(stay_ids_chest).astype(int)
+    ecg_admits['breathlessness'] = ecg_admits['ed_stay_id'].isin(stay_ids_dysp).astype(int)
+    ecg_admits['heart_palpitations'] = ecg_admits['ed_stay_id'].isin(stay_ids_palp).astype(int)
 
     print("Collected ECG measurements table..")
     return ecg_admits.lazy() if use_lazy else ecg_admits
@@ -430,182 +480,98 @@ def read_diagnoses_table(
         how="left",
     )
     adm_lkup = adm_lkup.filter(pl.col("edregtime") < pl.col("last_edregtime"))
-    # Filter diagnoses for lookup episodes
-    diag = diag.filter(pl.col("subject_id").is_in(adm_lkup.select("subject_id")))
-    diag = diag.filter(pl.col("hadm_id").is_in(adm_lkup.select("hadm_id")))
 
     print("Collected diagnoses table..")
     return diag.lazy() if use_lazy else diag
 
-
-def read_notes(
-    admissions_data: pl.DataFrame | pl.LazyFrame,
-    admits_last: pl.DataFrame | pl.LazyFrame,
+def read_procedures_table(
     mimic4_path: str,
+    admissions_data: pl.DataFrame | pl.LazyFrame,
+    adm_last: pl.DataFrame | pl.LazyFrame,
+    proc_dict_path: str = None,
     verbose: bool = True,
     use_lazy: bool = False,
 ) -> pl.LazyFrame | pl.DataFrame:
     """
-    Read and preprocess discharge summary and link Brief Hospital Course segments.
+    Read and preprocess the procedures table from MIMIC-IV and join with admissions.
 
     Args:
-        admissions_data (pl.DataFrame | pl.LazyFrame): Admissions table.
-        admits_last (pl.DataFrame | pl.LazyFrame): Final hospitalisations table for looking up notes history.
         mimic4_path (str): Path to directory containing MIMIC-IV module files.
+        admissions_data (pl.DataFrame | pl.LazyFrame): Admissions table.
+        adm_last (pl.DataFrame | pl.LazyFrame): Final hospitalisations table for looking up prior diagnoses.
         verbose (bool): If True, print summary statistics.
         use_lazy (bool): If True, return a Polars LazyFrame. Otherwise, return a DataFrame.
 
     Returns:
-        pl.LazyFrame | pl.DataFrame: Notes table joined with admissions and BHC segments.
+        pl.LazyFrame | pl.DataFrame: Procedures table filtered and joined with admissions.
     """
-    notes = pl.read_csv(
-        os.path.join(mimic4_path, "discharge.csv.gz"),
-        dtypes=[
-            pl.String,
-            pl.Int64,
-            pl.Int64,
-            pl.String,
-            pl.Int64,
-            pl.Datetime,
-            pl.Datetime,
-            pl.String,
-        ],
-        try_parse_dates=True,
-    ).select(["subject_id", "hadm_id", "note_id", "charttime", "storetime", "text"])
-
-    notes_ext = pl.read_csv(
-        os.path.join(mimic4_path, "mimic-iv-bhc.csv"),
-        dtypes=[pl.String, pl.String, pl.String, pl.Int64, pl.Int64],
-    ).select(["note_id", "input", "target", "input_tokens", "target_tokens"])
+    proc = pl.read_csv(
+        os.path.join(mimic4_path, "procedures_icd.csv.gz"),
+        columns=["subject_id", "hadm_id", "icd_code"],
+        dtypes=[pl.Int64, pl.Int64, pl.String],
+    )
 
     if isinstance(admissions_data, pl.LazyFrame):
         admissions_data = admissions_data.collect()
-    if isinstance(admits_last, pl.LazyFrame):
-        admits_last = admits_last.collect()
+    if isinstance(adm_last, pl.LazyFrame):
+        adm_last = adm_last.collect()
 
-    ### Merge with ED attendances cohort
-    if verbose:
-        print(
-            "Original number of notes:",
-            notes.shape[0],
-            notes.select("subject_id").n_unique(),
-        )
-    notes = notes.filter(
-        pl.col("subject_id").is_in(admissions_data.select("subject_id").to_series())
-    )
-    if verbose:
-        print(
-            "Number of notes with validated ED attendances:",
-            notes.shape[0],
-            notes.select("subject_id").n_unique(),
-        )
-    notes = notes.join(notes_ext, how="left", on="note_id")
-    if verbose:
-        print(
-            "Number of total matching preprocessed notes:",
-            notes.filter(pl.col("input").is_not_null()).shape[0],
-            notes.filter(pl.col("target").is_not_null()).shape[0],
-        )
-        print(
-            "Unique patients with matching preprocessed notes:",
-            notes.filter(pl.col("input").is_not_null()).select("subject_id").n_unique(),
-            notes.filter(pl.col("target").is_not_null())
-            .select("subject_id")
-            .n_unique(),
-        )
-
-    adm_notes = (
-        admissions_data.select(["subject_id", "hadm_id", "edregtime"])
-        .join(
-            notes.select(
-                [
-                    "note_id",
-                    "subject_id",
-                    "hadm_id",
-                    "charttime",
-                    "text",
-                    "input",
-                    "target",
-                    "input_tokens",
-                    "target_tokens",
-                ]
-            ),
-            on=["subject_id", "hadm_id"],
-            how="left",
-        )
-        .filter(pl.col("target").is_not_null())
-    )
-
-    ### Get previous hospital episodes as historical data
-    adm_lkup = adm_notes.join(
-        admits_last.select(["subject_id", "edregtime"]).rename(
+    # Get list of eligible hospital episodes as historical data
+    adm_lkup = admissions_data.join(
+        adm_last.select(["subject_id", "edregtime"]).rename(
             {"edregtime": "last_edregtime"}
         ),
         on="subject_id",
         how="left",
-    ).filter(pl.col("edregtime") < pl.col("last_edregtime"))
-    ## Replace more than one back-to-back '=' characters with ''
-    adm_notes = adm_notes.with_columns(pl.col("target").str.replace_all(r"==+", ""))
-
-    ### Get full notes history for each eligible patient
-    adm_notes = adm_notes.filter(
-        pl.col("hadm_id").is_in(adm_lkup.select("hadm_id").to_series())
     )
+    adm_lkup = adm_lkup.filter(pl.col("edregtime") < pl.col("last_edregtime"))
+    # Filter procedures for lookup episodes
+    proc = proc.filter(pl.col("subject_id").is_in(adm_lkup.select("subject_id")))
+    proc = proc.filter(pl.col("hadm_id").is_in(adm_lkup.select("hadm_id")))
+    ### If dict is populated generate categorical columns for each procedure
+    if proc_dict_path:
+        if verbose:
+            print(f"Loading procedure dictionary from {proc_dict_path}..")
+        with open(proc_dict_path) as json_dict:
+            proc_dict = json.load(json_dict)
 
-    return adm_notes.lazy() if use_lazy else adm_notes
+        proc['PCI'] = np.where(proc['icd_code'].isin(proc_dict['PCI']), 1, 0)
+        proc['CABG'] = np.where(proc['icd_code'].isin(proc_dict['CABG']), 1, 0)
+        adm_last = adm_last.join(proc.select(['subject_id', 'hadm_id', 'PCI', 'CABG']),
+                                 on=['subject_id', 'hadm_id'], how='left')
+        adm_last['PCI'] = adm_last['PCI'].fillna(0).astype(int)
+        adm_last['CABG'] = adm_last['CABG'].fillna(0).astype(int)
+        adm_last['prev_revasc'] = np.where((adm_last['PCI'] == 1) | (adm_last['CABG'] == 1), 1, 0)
 
+    print("Collected prior procedures...")
+    return adm_last.lazy() if use_lazy else adm_last
 
-def get_notes_population(
-    adm_notes: pl.DataFrame | pl.LazyFrame,
-    admit_last: pl.DataFrame | pl.LazyFrame,
+def read_outcomes_table(
+    mimic4_path: str,
+    adm_last: pl.DataFrame | pl.LazyFrame,
     use_lazy: bool = False,
-) -> pl.DataFrame:
+) -> pl.LazyFrame | pl.DataFrame:
     """
-    Get population of unique ED patients with existing note history.
-
-    Args:
-        adm_notes (pl.DataFrame | pl.LazyFrame): Notes table.
-        admit_last (pl.DataFrame | pl.LazyFrame): Last hospitalisations table for looking up notes history.
-        use_lazy (bool): If True, return a Polars LazyFrame. Otherwise, return a DataFrame.
+    Read and preprocess the diagnoses table from MIMIC-IV for future acute cardiac diagnoses.
 
     Returns:
-        tuple: Patients and Grouped notes table (ed_pts, notes_grouped) as DataFrames or LazyFrames.
+        pl.LazyFrame | pl.DataFrame: Outcomes table filtered and joined with admissions.
     """
-    if isinstance(adm_notes, pl.LazyFrame):
-        adm_notes = adm_notes.collect(streaming=True)
-    if isinstance(admit_last, pl.LazyFrame):
-        admit_last = admit_last.collect()
+    diag = pl.read_csv(
+        os.path.join(mimic4_path, "diagnoses_icd.csv.gz"),
+        columns=["subject_id", "hadm_id", "seq_num", "icd_code", "icd_version"],
+        dtypes=[pl.Int64, pl.Int64, pl.Int16, pl.String, pl.Int16],
+    )
+    diag_mapping = read_d_icd_diagnoses_table(mimic4_path)
+    if isinstance(adm_last, pl.LazyFrame):
+        adm_last = adm_last.collect()
 
-    ### Aggregate historical notes data with demographics
-    notes_grouped = adm_notes.groupby("subject_id").agg(
-        [
-            pl.col("hadm_id").n_unique().alias("num_summaries"),
-            pl.col("input_tokens").sum().alias("num_input_tokens"),
-            pl.col("target_tokens").sum().alias("num_target_tokens"),
-            pl.col("target")
-            .apply(lambda x: "<ENDNOTE> <STARTNOTE> ".join(x))
-            .alias("target"),
-        ]
-    )
-    ### Trim any leading or trailing whitespace
-    notes_grouped = notes_grouped.with_columns(pl.col("target").str.strip_chars())
-    ### Filter population with at least one note
-    ed_pts = admit_last.filter(
-        pl.col("subject_id").is_in(notes_grouped.select("subject_id"))
-    )
-    ## Save number of tokens per patient
-    ed_pts = ed_pts.join(
-        notes_grouped.select(
-            ["subject_id", "num_summaries", "num_input_tokens", "num_target_tokens"]
-        ),
-        on="subject_id",
-        how="left",
-    )
+    diag = diag.join(diag_mapping, on="icd_code", how="inner")
+    diag = diag.filter(pl.col("hadm_id").is_in(adm_last.select("hadm_id")))
+    diag = diag.filter(pl.col("subject_id").is_in(adm_last.select("subject_id")))
 
-    return (
-        ed_pts.lazy() if use_lazy else ed_pts,
-        notes_grouped.lazy() if use_lazy else notes_grouped,
-    )
+    print("Collected diagnoses table for current episode..")
+    return diag.lazy() if use_lazy else diag
 
 
 def read_omr_table(
@@ -816,20 +782,20 @@ def read_labevents_table(
     labs_data = labs_data.join(d_items, how="left", on="itemid")
     # select relevant columns
     labs_data = labs_data.select(
-        ["subject_id", "charttime", "itemid", "label", "value", "valueuom", "comments"]
+        ["subject_id", "hadm_id", "charttime", "itemid", "label", "value", "valueuom", "comments"]
     ).with_columns(
         charttime=pl.col("charttime").cast(pl.Datetime), linksto=pl.lit("labevents")
     )
     # get eligible lab tests prior to current episode
     labs_data = labs_data.join(
-        admits_last[["subject_id", "prev_edregtime", "prev_dischtime"]]
+        admits_last[["subject_id", "hadm_id", "prev_edregtime", "prev_dischtime"]]
         .lazy()
         .with_columns(
             prev_edregtime=pl.col("prev_edregtime").cast(pl.Datetime),
             prev_dischtime=pl.col("prev_dischtime").cast(pl.Datetime),
         ),
         how="left",
-        on="subject_id",
+        on=["subject_id", "hadm_id"],
     )
     labs_data = labs_data.filter(
         (pl.col("charttime") <= pl.col("prev_dischtime"))
@@ -850,7 +816,7 @@ def read_labevents_table(
         )
 
     labs_data = clean_labevents(labs_data)
-    labs_data = labs_data.sort(by=["subject_id", "charttime"])
+    labs_data = labs_data.sort(by=["subject_id", "hadm_id", "charttime"])
 
     return labs_data
 
@@ -989,94 +955,6 @@ def read_medications_table(
     admits_last = prepare_medication_features(
         meds, admits_last, top_n=top_n, use_lazy=use_lazy
     )
-    return admits_last.lazy() if use_lazy else admits_last
-
-
-def read_specialty_table(
-    mimic4_path: str, admits_last: pl.DataFrame | pl.LazyFrame, use_lazy: bool = False
-) -> pl.LazyFrame | pl.DataFrame:
-    """
-    Collect specialty-grouped count features from secondary care provider order history.
-
-    Args:
-        mimic4_path (str): Path to directory containing MIMIC-IV module files.
-        admits_last (pl.DataFrame | pl.LazyFrame): Last hospitalisations table for looking up historical data.
-        use_lazy (bool): If True, return a Polars LazyFrame. Otherwise, return a DataFrame.
-
-    Returns:
-        pl.LazyFrame | pl.DataFrame: Admissions table with specialty features.
-    """
-    if isinstance(admits_last, pl.LazyFrame):
-        admits_last = admits_last.collect()
-
-    poe = pl.read_csv(
-        os.path.join(mimic4_path, "poe.csv.gz"),
-        dtypes=[pl.Int64, pl.Datetime, pl.String],
-        columns=["subject_id", "ordertime", "order_type"],
-        try_parse_dates=True,
-    )
-    ### Link related orders
-    poe = poe.filter(pl.col("subject_id").is_in(admits_last.select("subject_id")))
-    poe = poe.sort(["subject_id", "ordertime"])
-    poe = poe.join(
-        admits_last.select(["subject_id", "edregtime"]), on="subject_id", how="left"
-    )
-    poe = poe.filter(pl.col("ordertime") < pl.col("edregtime"))
-    ### Filter order types of interest (can be extended to capture specific treatments)
-    poe = poe.filter(
-        pl.col("order_type").is_in(
-            [
-                "Nutrition",
-                "TPN",
-                "Cardiology",
-                "Radiology",
-                "Neurology",
-                "Respiratory",
-                "Hemodialysis",
-            ]
-        )
-    )
-    poe_ids = poe.groupby(["subject_id", "order_type"]).agg(
-        pl.count("order_type").alias("admin_proc_count")
-    )
-    poe_piv = poe_ids.pivot(
-        values="admin_proc_count",
-        index="subject_id",
-        columns="order_type",
-        aggregate_function="first",
-    )
-    ### Pivot table to create specialty count features
-    poe_piv.columns = [rename_fields(col) for col in poe_piv.columns]
-    poe_piv = poe_piv.with_columns(pl.col("*").fill_null(0))
-    poe_piv_total = poe_ids.groupby("subject_id").agg(
-        pl.count("order_type").alias("total_proc_count")
-    )
-    admits_last = admits_last.join(poe_piv_total, on="subject_id", how="left")
-    admits_last = admits_last.join(poe_piv, on="subject_id", how="left")
-    admits_last = admits_last.with_columns(
-        pl.col("total_proc_count").fill_null(0).cast(pl.Int16)
-    )
-    ### Rename each specialty column with po_ prefix
-    admits_last = admits_last.rename(
-        {
-            "Nutrition": "pon_nutrition",
-            "TPN": "pon_tpn",
-            "Cardiology": "pon_cardiology",
-            "Radiology": "pon_radiology",
-            "Neurology": "pon_neurology",
-            "Respiratory": "pon_respiratory",
-            "Hemodialysis": "pon_hemodialysis",
-        }
-    )
-    ### Fill any NA values in the specialty columns with 0
-    admits_last = admits_last.with_columns(
-        [
-            pl.col(col).fill_null(0)
-            for col in admits_last.columns
-            if col.startswith("pon_")
-        ]
-    )
-
     return admits_last.lazy() if use_lazy else admits_last
 
 
