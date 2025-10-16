@@ -7,9 +7,10 @@ import polars as pl
 from utils.preprocessing import (
     clean_labevents,
     prepare_medication_features,
-    rename_fields,
     transform_sensitive_attributes,
 )
+from utils.functions import get_n_unique_values
+import re
 
 
 def read_admissions_table(
@@ -104,7 +105,7 @@ def read_admissions_table(
 
     ### Get ED attendance metadata
     ed_stays = pl.read_csv(
-        os.path.join(mimic4_path, "edstays.csv.gz"),
+        os.path.join(mimic4_ed_path, "edstays.csv.gz"),
         columns=['subject_id', 'hadm_id', 'stay_id', 'intime', 'arrival_transport', 'disposition'],
         dtypes=[pl.Int64, pl.Int64, pl.Int64, pl.Datetime, pl.String, pl.String],
         try_parse_dates=True,
@@ -113,7 +114,10 @@ def read_admissions_table(
     ed_stays = ed_stays.filter(pl.col("hadm_id").is_in(admits.select("hadm_id")))
     ed_stays = ed_stays.sort(by=["subject_id", "hadm_id", "intime"])
     ed_stays = ed_stays.unique(subset=["hadm_id"], keep="last")
+    ed_stays = ed_stays.rename({"stay_id": "ed_stay_id", "intime": "ed_intime"})
     admits = admits.join(ed_stays, on=["subject_id", "hadm_id"], how="left")
+    admits = admits.filter(pl.col("ed_stay_id").is_not_null())
+    admits = admits.with_columns(pl.col("ed_stay_id").cast(pl.Int64))
 
     if verbose:
         print(
@@ -282,6 +286,7 @@ def read_ecg_measurements(
     mimic4_ed_path: str,
     admissions_data: pl.DataFrame | pl.LazyFrame,
     use_lazy: bool = False,
+    verbose: bool = True,
 ) -> pl.LazyFrame | pl.DataFrame:
     """
     Read and preprocess the ECG measurements table from MIMIC-IV and join with admissions.
@@ -297,10 +302,16 @@ def read_ecg_measurements(
     """
     ecg_measures = pl.read_csv(
         os.path.join(mimic4_ecg_path, "machine_measurements.csv"),
-        columns=["subject_id", "study_id", "cart_id", "ecgtime", "report_0", "rr_interval",
+        columns=["subject_id", "study_id", "cart_id", "ecg_time", "report_0",
+                 "report_1", "report_2", "report_3", "report_4", "report_5", "report_6",
+                 "report_7", "report_8", "report_9", "report_10", "report_11", "report_12",
+                 "report_13", "report_14", "report_15", "report_16", "report_17", "rr_interval",
                  "p_onset", "p_end", "qrs_onset", "qrs_end", "t_end", "p_axis", "qrs_axis", "t_axis"],
-        dtypes=[pl.Int64, pl.Int64, pl.Int64, pl.Datetime, pl.String, pl.String, pl.Int64,
-                pl.Int64, pl.Int64, pl.Int64, pl.Int64, pl.Int64, pl.Int64, pl.Int64],
+        dtypes=[pl.Int64, pl.Int64, pl.Int64, pl.Datetime, pl.String, pl.String,
+                pl.String, pl.String, pl.String, pl.String, pl.String, pl.String,
+                pl.String, pl.String, pl.String, pl.String, pl.String, pl.String,
+                pl.String, pl.String, pl.String, pl.String, pl.Int64,
+                pl.Int64, pl.Int64, pl.Int64, pl.Int64, pl.Int64, pl.Int64, pl.Int64, pl.Int64],
         try_parse_dates=True,
     )
 
@@ -309,13 +320,13 @@ def read_ecg_measurements(
         columns=["subject_id", "stay_id", "chiefcomplaint"],
         dtypes=[pl.Int64, pl.Int64, pl.String],
     )
+    edmd_measures = edmd_measures.rename({"stay_id": "ed_stay_id"})
 
     if isinstance(admissions_data, pl.LazyFrame):
         admissions_data = admissions_data.collect()
 
     ecg_measures = ecg_measures.filter(
         pl.col("subject_id").is_in(admissions_data.select("subject_id"))
-        & pl.col("hadm_id").is_in(admissions_data.select("hadm_id"))
     )
 
     print("Collected ECG measurements table..")
@@ -324,41 +335,82 @@ def read_ecg_measurements(
         admissions_data = admissions_data.collect()
 
     ### ECG measurements preprocessing ###
-    # Estimate additional ECG features
-    ecg_measures['rr_interval_seconds'] = ecg_measures['rr_interval'] / 1000
-    ecg_measures['ventricular_rate'] = 60 / ecg_measures['rr_interval_seconds']
-    ecg_measures['pr_interval'] = ecg_measures['qrs_onset'] - ecg_measures['p_onset']
-    ecg_measures['p_wave_duration'] = ecg_measures['p_end'] - ecg_measures['p_onset']
-    ecg_measures['qrs_duration'] = ecg_measures['qrs_end'] - ecg_measures['qrs_onset']
-    ecg_measures['qt_interval'] = ecg_measures['t_end'] - ecg_measures['qrs_onset']
+    # Convert rr_interval to numeric first (it might be a string)
+    ecg_measures = ecg_measures.with_columns(
+        pl.col("rr_interval").cast(pl.Float64, strict=False)
+    )
 
-    # Check for plausibility of values
-    ecg_measures['pr_interval'] = ecg_measures['pr_interval'].apply(lambda x: np.nan if x < 20 or x > 500 else x)
-    ecg_measures['p_wave_duration'] = ecg_measures['p_wave_duration'].apply(lambda x: np.nan if x <= 20 or x > 300 else x)
-    ecg_measures['qrs_duration'] = ecg_measures['qrs_duration'].apply(lambda x: np.nan if x < 50 or x > 300 else x)
-    ecg_measures['qt_interval'] = ecg_measures['qt_interval'].apply(lambda x: np.nan if x < 200 or x > 700 else x)
+    # Estimate additional ECG features using Polars syntax
+    ecg_measures = ecg_measures.with_columns([
+        (pl.col("rr_interval") / 1000).alias("rr_interval_seconds"),
+        (pl.col("qrs_onset") - pl.col("p_onset")).alias("pr_interval"),
+        (pl.col("p_end") - pl.col("p_onset")).alias("p_wave_duration"),
+        (pl.col("qrs_end") - pl.col("qrs_onset")).alias("qrs_duration"),
+        (pl.col("t_end") - pl.col("qrs_onset")).alias("qt_interval")
+    ])
+
+    # Calculate ventricular rate after rr_interval_seconds is created
+    ecg_measures = ecg_measures.with_columns(
+        (60 / pl.col("rr_interval_seconds")).alias("ventricular_rate")
+    )
+
+    # Check for plausibility of values using Polars when/then syntax
+    ecg_measures = ecg_measures.with_columns([
+        pl.when((pl.col("pr_interval") < 20) | (pl.col("pr_interval") > 500))
+        .then(None)
+        .otherwise(pl.col("pr_interval"))
+        .alias("pr_interval"),
+
+        pl.when((pl.col("p_wave_duration") <= 20) | (pl.col("p_wave_duration") > 300))
+        .then(None)
+        .otherwise(pl.col("p_wave_duration"))
+        .alias("p_wave_duration"),
+
+        pl.when((pl.col("qrs_duration") < 50) | (pl.col("qrs_duration") > 300))
+        .then(None)
+        .otherwise(pl.col("qrs_duration"))
+        .alias("qrs_duration"),
+
+        pl.when((pl.col("qt_interval") < 200) | (pl.col("qt_interval") > 700))
+        .then(None)
+        .otherwise(pl.col("qt_interval"))
+        .alias("qt_interval")
+    ])
+
     # Calculate qtc_interval using Bazett's formula
-    ecg_measures['qtc_interval'] = ecg_measures['qt_interval'] / np.sqrt(60 / ecg_measures['ventricular_rate'])
-
-    # Drop the temporary rr_interval_sec column if not needed
-    ecg_measures.drop(columns=['rr_interval_seconds'], inplace=True)
-    # Replace p_axis with NaN if p_wave_duration is NaN
-    ecg_measures['p_axis'] = ecg_measures.apply(
-    lambda row: np.nan if pd.isna(row['p_wave_duration']) else row['p_axis'], axis=1
+    ecg_measures = ecg_measures.with_columns(
+        (pl.col("qt_interval") / (60 / pl.col("ventricular_rate")).sqrt()).alias("qtc_interval")
     )
 
-    # Replace qrs_axis with NaN if qrs_duration is NaN
-    ecg_measures['qrs_axis'] = ecg_measures.apply(
-    lambda row: np.nan if pd.isna(row['qrs_duration']) else row['qrs_axis'], axis=1
-    )
+    # Drop the temporary rr_interval_seconds column
+    ecg_measures = ecg_measures.drop("rr_interval_seconds")
 
-    # Replace t_axis with NaN if qt_interval is NaN
-    ecg_measures['t_axis'] = ecg_measures.apply(
-        lambda row: np.nan if pd.isna(row['qt_interval']) else row['t_axis'], axis=1
-    )
-    ecg_measures['p_axis'] = ecg_measures['p_axis'].apply(lambda x: np.nan if x < -90 or x > 270 else x)
-    ecg_measures['qrs_axis'] = ecg_measures['qrs_axis'].apply(lambda x: np.nan if x < -90 or x > 270 else x)
-    ecg_measures['t_axis'] = ecg_measures['t_axis'].apply(lambda x: np.nan if x < -90 or x > 270 else x)
+    # Replace axis values with None if corresponding duration/interval is null or out of range
+    ecg_measures = ecg_measures.with_columns([
+        pl.when(pl.col("p_wave_duration").is_null())
+        .then(None)
+        .when((pl.col("p_axis") < -90) | (pl.col("p_axis") > 270))
+        .then(None)
+        .otherwise(pl.col("p_axis"))
+        .alias("p_axis"),
+
+        pl.when(pl.col("qrs_duration").is_null())
+        .then(None)
+        .when((pl.col("qrs_axis") < -90) | (pl.col("qrs_axis") > 270))
+        .then(None)
+        .otherwise(pl.col("qrs_axis"))
+        .alias("qrs_axis"),
+
+        pl.when(pl.col("qt_interval").is_null())
+        .then(None)
+        .when((pl.col("t_axis") < -90) | (pl.col("t_axis") > 270))
+        .then(None)
+        .otherwise(pl.col("t_axis"))
+        .alias("t_axis")
+    ])
+
+    ecg_measures = ecg_measures.with_columns([pl.col(col).fill_null(-1) for col in ['p_axis', 'qrs_axis', 't_axis', 'pr_interval', 'p_wave_duration', 'qrs_duration', 'qt_interval', 'ventricular_rate', 'qtc_interval']])
+
     ## Diagnostics
     # Create full_report by merging all report columns (report_0 to report_17)
     report_cols = [f'report_{i}' for i in range(18)]  # report_0 to report_17
@@ -366,54 +418,113 @@ def read_ecg_measurements(
 
     print(f"Found report columns: {existing_report_cols}")
 
-    # Fill NaN values with empty string before concatenation
-    ecg_measures[existing_report_cols] = ecg_measures[existing_report_cols].fillna('')
+    # Fill null values with empty string and concatenate using Polars
+    ecg_measures = ecg_measures.with_columns([
+        pl.col(col).fill_null("").alias(col) for col in existing_report_cols
+    ])
 
     # Concatenate all report columns with space separator
-    ecg_measures['full_report'] = ecg_measures[existing_report_cols].apply(
-        lambda row: ' '.join(row.values), axis=1
+    ecg_measures = ecg_measures.with_columns(
+        pl.concat_str(existing_report_cols, separator=" ").alias("full_report")
     )
 
-    # Clean up the full_report text
-    ecg_measures['full_report'] = ecg_measures['full_report'].str.replace('\n', ' ').str.replace('\r', ' ')
-    ecg_measures['full_report'] = ecg_measures['full_report'].str.replace('  ', ' ')
-    ecg_measures['full_report'] = ecg_measures['full_report'].str.strip()
-    ecg_measures['full_report'] = ecg_measures['full_report'].str.lower()
+    # Clean up the full_report text using Polars string methods
+    ecg_measures = ecg_measures.with_columns(
+        pl.col("full_report")
+        .str.replace_all("\n", " ")
+        .str.replace_all("\r", " ")
+        .str.replace_all("  ", " ")
+        .str.strip_chars()
+        .str.to_lowercase()
+        .alias("full_report")
+    )
 
-    # Create clinical indicators from the full report
-    ecg_measures['normal'] = ecg_measures['full_report'].apply(lambda x: 1 if pd.notna(x) and ('sinus rhythm' in x or 'sinus tachycardia' in x or 'sinus bradycardia' in x) and not 'abnormal ecg' in x else 0)
-    ecg_measures['st-elevation'] = ecg_measures['full_report'].apply(lambda x: 1 if pd.notna(x) and 'elevat' in x else 0)
-    ecg_measures['myocardial_ischemia'] = ecg_measures['full_report'].apply(lambda x: 1 if pd.notna(x) and 'ischemia' in x else 0)
+    # Create clinical indicators from the full report using Polars
+    ecg_measures = ecg_measures.with_columns([
+        pl.when(
+            pl.col("full_report").is_not_null() &
+            (pl.col("full_report").str.contains("sinus rhythm") |
+             pl.col("full_report").str.contains("sinus tachycardia") |
+             pl.col("full_report").str.contains("sinus bradycardia")) &
+            ~pl.col("full_report").str.contains("abnormal ecg")
+        )
+        .then(1)
+        .otherwise(0)
+        .alias("ecg_normal"),
+
+        pl.when(
+            pl.col("full_report").is_not_null() &
+            pl.col("full_report").str.contains("elevat")
+        )
+        .then(1)
+        .otherwise(0)
+        .alias("ecg_st_elevation"),
+
+        pl.when(
+            pl.col("full_report").is_not_null() &
+            pl.col("full_report").str.contains("ischemia")
+        )
+        .then(1)
+        .otherwise(0)
+        .alias("ecg_myocardial_ischemia")
+    ])
 
     # Merge with admissions data to filter relevant ECGs
-    ecg_admits = admissions_data.join(ecg_measures, on="subject_id", how="left")
+    ecg_admits = admissions_data.join(ecg_measures.select(["subject_id", "ecg_time", "full_report", "ecg_normal", "ecg_st_elevation", "ecg_myocardial_ischemia"]), on="subject_id", how="left")
+
+    # Filter the ECGs to keep only those within 3 hours after ED presentation using Polars
     ecg_admits = ecg_admits.filter(
-        pl.col("hadm_id").is_in(ecg_measures.select("hadm_id"))
+        (pl.col("ecg_time") >= pl.col("edregtime")) &
+        (pl.col("ecg_time") <= pl.col("edregtime") + pl.duration(hours=3))
     )
-    # Filter the ECGs to keep only those within 3 hours after ED presentation
-    ecg_admits = ecg_admits.filter(
-        (ecg_admits['ecg_time'] >= ecg_admits['edregtime']) & (ecg_admits['ecg_time'] <= ecg_admits['edregtime'] + pd.Timedelta(hours=3))
-    )
+    ecg_admits = ecg_admits.sort(by=["subject_id", "hadm_id", "ecg_time"]).unique(subset=["subject_id", "hadm_id"], keep="last")
+
     # Get presenting complaint
     edmd_measures = edmd_measures.filter(
-        pl.col("subject_id").is_in(ecg_admits.select("subject_id"))
-        & pl.col("hadm_id").is_in(ecg_admits.select("hadm_id"))
-        & pl.col("stay_id").is_in(ecg_admits.select("stay_id"))
+        pl.col("subject_id").is_in(ecg_admits.select("subject_id")) &
+        pl.col("ed_stay_id").is_in(ecg_admits.select("ed_stay_id"))
     )
-    # Define a regex pattern to capture variations of chest pain, dyspnea, and palpitations
-    symptoms_pattern = r'(chest[\s-]*pain|dyspnea|dysnea|shortness[\s-]*of[\s-]*breath|palpitation|palpitations|chest[\s-]*tightness|angina pectoris)'
-    stay_ids_symp = edmd_measures[edmd_measures['chiefcomplaint'].str.contains(symptoms_pattern, case=False, na=False, regex=True)]['stay_id'].unique()
-    chest_pain_pattern = r'(chest[\s-]*pain|chest[\s-]*tightness|angina pectoris)'
-    stay_ids_chest = edmd_measures[edmd_measures['chiefcomplaint'].str.contains(chest_pain_pattern, case=False, na=False, regex=True)]['stay_id'].unique()
-    dyspnea_pattern = r'(dyspnea|dysnea|shortness[\s-]*of[\s-]*breath)'
-    stay_ids_dysp = edmd_measures[edmd_measures['chiefcomplaint'].str.contains(dyspnea_pattern, case=False, na=False, regex=True)]['stay_id'].unique()
-    palpitations_pattern = r'(palpitation|palpitations)'
-    stay_ids_palp = edmd_measures[edmd_measures['chiefcomplaint'].str.contains(palpitations_pattern, case=False, na=False, regex=True)]['stay_id'].unique()
 
-    ecg_admits['suggestive_symptoms'] = ecg_admits['ed_stay_id'].isin(stay_ids_symp).astype(int)
-    ecg_admits['chest_pain'] = ecg_admits['ed_stay_id'].isin(stay_ids_chest).astype(int)
-    ecg_admits['breathlessness'] = ecg_admits['ed_stay_id'].isin(stay_ids_dysp).astype(int)
-    ecg_admits['heart_palpitations'] = ecg_admits['ed_stay_id'].isin(stay_ids_palp).astype(int)
+    # Define regex patterns to capture variations of chest pain, dyspnea, and palpitations
+    symptoms_pattern = r'(?i)(chest[\s-]*pain|dyspnea|dysnea|shortness[\s-]*of[\s-]*breath|palpitation|palpitations|chest[\s-]*tightness|angina pectoris)'
+    chest_pain_pattern = r'(?i)(chest[\s-]*pain|chest[\s-]*tightness|angina pectoris)'
+    dyspnea_pattern = r'(?i)(dyspnea|dysnea|shortness[\s-]*of[\s-]*breath)'
+    palpitations_pattern = r'(?i)(palpitation|palpitations)'
+
+    # Filter for each symptom using Polars string contains
+    stay_ids_symp = edmd_measures.filter(
+        pl.col("chiefcomplaint").str.contains(symptoms_pattern)
+    ).select("ed_stay_id").unique()
+
+    stay_ids_chest = edmd_measures.filter(
+        pl.col("chiefcomplaint").str.contains(chest_pain_pattern)
+    ).select("ed_stay_id").unique()
+
+    stay_ids_dysp = edmd_measures.filter(
+        pl.col("chiefcomplaint").str.contains(dyspnea_pattern)
+    ).select("ed_stay_id").unique()
+
+    stay_ids_palp = edmd_measures.filter(
+        pl.col("chiefcomplaint").str.contains(palpitations_pattern)
+    ).select("ed_stay_id").unique()
+
+    # Create symptom indicator columns using Polars
+    ecg_admits = ecg_admits.with_columns([
+        pl.col("ed_stay_id").is_in(stay_ids_symp).cast(pl.Int8).alias("suggestive_symptoms"),
+        pl.col("ed_stay_id").is_in(stay_ids_chest).cast(pl.Int8).alias("chest_pain"),
+        pl.col("ed_stay_id").is_in(stay_ids_dysp).cast(pl.Int8).alias("breathlessness"),
+        pl.col("ed_stay_id").is_in(stay_ids_palp).cast(pl.Int8).alias("heart_palpitations")
+    ])
+    ecg_admits = ecg_admits.with_columns([pl.col(col).fill_null(0).cast(pl.Int8) for col in ['suggestive_symptoms', 'chest_pain', 'breathlessness', 'heart_palpitations']])
+
+    if verbose:
+        print(f'Number of attendances with suggestive symptoms: {ecg_admits.filter(pl.col("suggestive_symptoms") == 1).select("subject_id").n_unique()}, % of pts: {ecg_admits.filter(pl.col("suggestive_symptoms") == 1).select("subject_id").n_unique() / ecg_admits.select("subject_id").n_unique() * 100:.2f}')
+        print(f'Number of attendances with chest pain: {ecg_admits.filter(pl.col("chest_pain") == 1).select("subject_id").n_unique()}, % of pts: {ecg_admits.filter(pl.col("chest_pain") == 1).select("subject_id").n_unique() / ecg_admits.select("subject_id").n_unique() * 100:.2f}')
+        print(f'Number of attendances with breathlessness: {ecg_admits.filter(pl.col("breathlessness") == 1).select("subject_id").n_unique()}, % of pts: {ecg_admits.filter(pl.col("breathlessness") == 1).select("subject_id").n_unique() / ecg_admits.select("subject_id").n_unique() * 100:.2f}')
+        print(f'Number of attendances with palpitations: {ecg_admits.filter(pl.col("heart_palpitations") == 1).select("subject_id").n_unique()}, % of pts: {ecg_admits.filter(pl.col("heart_palpitations") == 1).select("subject_id").n_unique() / ecg_admits.select("subject_id").n_unique() * 100:.2f}')
+        print(f'Number of attendances with normal ECG: {ecg_admits.filter(pl.col("ecg_normal") == 1).select("subject_id").n_unique()}, % of pts: {ecg_admits.filter(pl.col("ecg_normal") == 1).select("subject_id").n_unique() / ecg_admits.select("subject_id").n_unique() * 100:.2f}')
+        print(f'Number of attendances with ST-elevation: {ecg_admits.filter(pl.col("ecg_st_elevation") == 1).select("subject_id").n_unique()}, % of pts: {ecg_admits.filter(pl.col("ecg_st_elevation") == 1).select("subject_id").n_unique() / ecg_admits.select("subject_id").n_unique() * 100:.2f}')
+        print(f'Number of attendances with myocardial ischemia: {ecg_admits.filter(pl.col("ecg_myocardial_ischemia") == 1).select("subject_id").n_unique()}, % of pts: {ecg_admits.filter(pl.col("ecg_myocardial_ischemia") == 1).select("subject_id").n_unique() / ecg_admits.select("subject_id").n_unique() * 100:.2f}')
 
     print("Collected ECG measurements table..")
     return ecg_admits.lazy() if use_lazy else ecg_admits
@@ -528,6 +639,7 @@ def read_procedures_table(
     # Filter procedures for lookup episodes
     proc = proc.filter(pl.col("subject_id").is_in(adm_lkup.select("subject_id")))
     proc = proc.filter(pl.col("hadm_id").is_in(adm_lkup.select("hadm_id")))
+    print(proc.shape, get_n_unique_values(proc, "hadm_id"))
     ### If dict is populated generate categorical columns for each procedure
     if proc_dict_path:
         if verbose:
@@ -535,13 +647,43 @@ def read_procedures_table(
         with open(proc_dict_path) as json_dict:
             proc_dict = json.load(json_dict)
 
-        proc['PCI'] = np.where(proc['icd_code'].isin(proc_dict['PCI']), 1, 0)
-        proc['CABG'] = np.where(proc['icd_code'].isin(proc_dict['CABG']), 1, 0)
-        adm_last = adm_last.join(proc.select(['subject_id', 'hadm_id', 'PCI', 'CABG']),
-                                 on=['subject_id', 'hadm_id'], how='left')
-        adm_last['PCI'] = adm_last['PCI'].fillna(0).astype(int)
-        adm_last['CABG'] = adm_last['CABG'].fillna(0).astype(int)
-        adm_last['prev_revasc'] = np.where((adm_last['PCI'] == 1) | (adm_last['CABG'] == 1), 1, 0)
+        pci_list = proc_dict.get("proc_PCI", [])
+        cabg_list = proc_dict.get("proc_CABG", [])
+        pci_pat = "|".join(re.escape(x) for x in pci_list) if pci_list else r"^$"
+        cabg_pat = "|".join(re.escape(x) for x in cabg_list) if cabg_list else r"^$"
+
+        proc = proc.with_columns([
+            pl.when(pl.col("icd_code").is_not_null() & pl.col("icd_code").str.contains(pci_pat))
+            .then(1)
+            .otherwise(0)
+            .cast(pl.Int8)
+            .alias("proc_PCI"),
+
+            pl.when(pl.col("icd_code").is_not_null() & pl.col("icd_code").str.contains(cabg_pat))
+            .then(1)
+            .otherwise(0)
+            .cast(pl.Int8)
+            .alias("proc_CABG")
+        ])
+
+        adm_last = adm_last.join(
+            proc.select(['subject_id', 'proc_PCI', 'proc_CABG']),
+            on=['subject_id'],
+            how='left'
+        )
+        adm_last = adm_last.with_columns(
+            ((pl.col('proc_PCI') == 1) | (pl.col('proc_CABG') == 1)).cast(pl.Int8).alias('prev_revasc')
+        )
+        adm_last = adm_last.with_columns([
+            pl.col('proc_PCI').fill_null(0).cast(pl.Int8),
+            pl.col('proc_CABG').fill_null(0).cast(pl.Int8),
+            pl.col('prev_revasc').fill_null(0).cast(pl.Int8)
+        ])
+        adm_last = adm_last.sort(by=["subject_id", "hadm_id"]).unique(subset=["subject_id"], keep="last")
+
+    if verbose:
+        print(f'Number of attendances with prior PCI: {adm_last.filter(pl.col("proc_PCI") == 1).select("subject_id").n_unique()}, % of pts: {adm_last.filter(pl.col("proc_PCI") == 1).select("subject_id").n_unique() / adm_last.select("subject_id").n_unique() * 100:.2f}')
+        print(f'Number of attendances with prior CABG: {adm_last.filter(pl.col("proc_CABG") == 1).select("subject_id").n_unique()}, % of pts: {adm_last.filter(pl.col("proc_CABG") == 1).select("subject_id").n_unique() / adm_last.select("subject_id").n_unique() * 100:.2f}')
 
     print("Collected prior procedures...")
     return adm_last.lazy() if use_lazy else adm_last
@@ -617,15 +759,12 @@ def read_omr_table(
 
     ### Prepare hospital measures time-series
     omr = omr.join(
-        admits_last.select(["subject_id", "prev_edregtime", "prev_dischtime"]),
+        admits_last.select(["subject_id", "edregtime"]),
         on="subject_id",
         how="left",
     )
-    omr = omr.filter(
-        (pl.col("charttime") <= pl.col("prev_dischtime"))
-        & (pl.col("charttime") >= pl.col("prev_edregtime"))
-    )
-    omr = omr.drop(["prev_edregtime", "prev_dischtime"])
+    omr = omr.filter(((pl.col("charttime") <= pl.col("edregtime") + pl.duration(hours=3))))
+    omr = omr.drop(["edregtime"])
 
     ### Requires reverting to pandas for string operations
     omr = omr.to_pandas()
@@ -717,17 +856,14 @@ def read_vitals_table(
 
     ### Prepare ed vital signs measures in long table format
     vitals = vitals.filter(pl.col("subject_id").is_in(admits_last.select("subject_id")))
-    vitals = vitals.drop(["stay_id", "pain", "rhythm"])
+    vitals = vitals.drop(["ed_stay_id", "pain", "rhythm"])
     vitals = vitals.join(
-        admits_last.select(["subject_id", "prev_edregtime", "prev_dischtime"]),
+        admits_last.select(["subject_id", "edregtime"]),
         on="subject_id",
         how="left",
     )
-    vitals = vitals.filter(
-        (pl.col("charttime") <= pl.col("prev_dischtime"))
-        & (pl.col("charttime") >= pl.col("prev_edregtime"))
-    )
-    vitals = vitals.drop(["prev_edregtime", "prev_dischtime"])
+    vitals = vitals.filter(((pl.col("charttime") <= pl.col("edregtime") + pl.duration(hours=3))))
+    vitals = vitals.drop(["edregtime"])
     vitals = vitals.rename(vitalsign_column_map)
     vitals = vitals.melt(
         id_vars=["subject_id", "charttime"],
@@ -753,7 +889,8 @@ def read_vitals_table(
 def read_labevents_table(
     mimic4_path: str,
     admits_last: pl.DataFrame | pl.LazyFrame,
-    include_items: str = "None",
+    include_items: None,
+    items_path: str = "../config/lab_items.txt",
 ) -> pl.LazyFrame:
     """
     Read and preprocess the labevents table from MIMIC-IV.
@@ -786,37 +923,38 @@ def read_labevents_table(
     ).with_columns(
         charttime=pl.col("charttime").cast(pl.Datetime), linksto=pl.lit("labevents")
     )
+    labs_data = labs_data.with_columns(pl.col("hadm_id").cast(pl.Int64))
+    labs_data = labs_data.with_columns(pl.col("subject_id").cast(pl.Int64))
+
     # get eligible lab tests prior to current episode
     labs_data = labs_data.join(
-        admits_last[["subject_id", "hadm_id", "prev_edregtime", "prev_dischtime"]]
+        admits_last[["subject_id", "hadm_id", "edregtime"]]
         .lazy()
         .with_columns(
-            prev_edregtime=pl.col("prev_edregtime").cast(pl.Datetime),
-            prev_dischtime=pl.col("prev_dischtime").cast(pl.Datetime),
+            edregtime=pl.col("edregtime").cast(pl.Datetime)
         ),
         how="left",
         on=["subject_id", "hadm_id"],
     )
-    labs_data = labs_data.filter(
-        (pl.col("charttime") <= pl.col("prev_dischtime"))
-        & (pl.col("charttime") >= pl.col("prev_edregtime"))
-    ).drop(["prev_edregtime", "prev_dischtime"])
+    labs_data = labs_data.collect(streaming=True)
+    labs_data = labs_data.filter((pl.col("charttime") <= pl.col("edregtime") + pl.duration(hours=3)))
+    labs_data = labs_data.drop(["edregtime"])
     # get most common items (top 50 itemids by label)
     if include_items is None:
         lab_items = labs_data.groupby("itemid").agg(pl.count().alias("count")).sort("count", descending=True).head(50)
         ### Export items to file
         #lab_items.collect().write_csv("../config/lab_items.csv")
-    if include_items is not None:
+    if include_items is not None and items_path is not None:
         # read txt file containing list of ids
-        with open(include_items) as f:
+        with open(items_path) as f:
             lab_items = list(f.read().splitlines())
 
     labs_data = labs_data.filter(
             pl.col("itemid").cast(pl.Utf8).is_in(set(lab_items))
         )
-
     labs_data = clean_labevents(labs_data)
     labs_data = labs_data.sort(by=["subject_id", "hadm_id", "charttime"])
+    labs_data = labs_data.drop("comments", "hadm_id")
 
     return labs_data
 
@@ -874,49 +1012,10 @@ def merge_events_table(
     return events.lazy() if use_lazy else events
 
 
-def get_population_with_measures(
-    events: pl.DataFrame | pl.LazyFrame,
-    admit_last: pl.DataFrame | pl.LazyFrame,
-    use_lazy: bool = False,
-) -> pl.DataFrame:
-    """
-    Get population of unique ED patients with recorded measurements.
-
-    Args:
-        events (pl.DataFrame | pl.LazyFrame): Events table.
-        admit_last (pl.DataFrame | pl.LazyFrame): Last hospitalisations table for lookup.
-        use_lazy (bool): If True, return a Polars LazyFrame. Otherwise, return a DataFrame.
-
-    Returns:
-        pl.DataFrame or pl.LazyFrame: Patient-level table with measurement counts.
-    """
-    if isinstance(events, pl.LazyFrame):
-        events = events.collect(streaming=True)
-    if isinstance(admit_last, pl.LazyFrame):
-        admit_last = admit_last.collect()
-
-    ### Aggregate historical notes data with demographics
-    events_grouped = events.groupby("subject_id").agg(
-        [pl.col("itemid").n_unique().alias("num_measures")]
-    )
-    ### Filter population with at least one measure
-    ed_pts = admit_last.filter(
-        pl.col("subject_id").is_in(events_grouped.select("subject_id"))
-    )
-    ## Save number of tokens per patient
-    ed_pts = ed_pts.join(
-        events_grouped.select(["subject_id", "num_measures"]),
-        on="subject_id",
-        how="left",
-    )
-    return ed_pts.lazy() if use_lazy else ed_pts
-
-
 def read_medications_table(
     mimic4_path: str,
     admits_last: pl.DataFrame | pl.LazyFrame,
     use_lazy: bool = False,
-    top_n: int = 50,
 ) -> pl.LazyFrame | pl.DataFrame:
     """
     Get medication table from online administration record containing orders data.
@@ -953,7 +1052,7 @@ def read_medications_table(
     )
     ### Generate drug-level features and append to EHR data
     admits_last = prepare_medication_features(
-        meds, admits_last, top_n=top_n, use_lazy=use_lazy
+        meds, admits_last, use_lazy=use_lazy
     )
     return admits_last.lazy() if use_lazy else admits_last
 

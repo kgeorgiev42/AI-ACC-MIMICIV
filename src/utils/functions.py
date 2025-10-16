@@ -91,23 +91,6 @@ def get_final_episodes(stays: pl.DataFrame | pl.LazyFrame) -> pl.DataFrame:
     stays_final = stays.sort(["subject_id", "edregtime"]).unique(
         subset=["subject_id"], keep="last"
     )
-    ### Get second-to-last episode for time-series collection
-    stays_second_last = stays.sort(["subject_id", "edregtime"]).filter(
-        ~pl.col("hadm_id").is_in(stays_final["hadm_id"])
-    )
-    stays_second_last = stays_second_last.sort(["subject_id", "edregtime"]).unique(
-        subset=["subject_id"], keep="last"
-    )
-    stays_second_last = stays_second_last.rename(
-        {"edregtime": "prev_edregtime", "dischtime": "prev_dischtime"}
-    ).select(["subject_id", "prev_edregtime", "prev_dischtime"])
-    stays_final = stays_final.join(stays_second_last, on="subject_id", how="left")
-    ## Drop NAs in prev_dischtime or prev_edregtime
-    stays_final = stays_final.filter(
-        ~pl.col("prev_dischtime").is_null() & ~pl.col("prev_edregtime").is_null()
-    )
-    ## Drop any overlapping episodes
-    stays_final = stays_final.filter(pl.col("edregtime") > pl.col("prev_dischtime"))
 
     return stays_final
 

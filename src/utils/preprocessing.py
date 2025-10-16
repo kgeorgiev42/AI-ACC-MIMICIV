@@ -12,6 +12,7 @@ from tqdm import tqdm
 from transformers import AutoModel, AutoTokenizer
 from utils.functions import (
     contains_both_ltc_types,
+    get_n_unique_values,
     get_train_split_summary,
     read_icd_mapping,
     rename_fields,
@@ -140,7 +141,7 @@ def preproc_icd_module(
         diagnoses = diagnoses.with_columns(
             pl.lit("Undefined").alias(cond_alias).cast(pl.Utf8)
         )
-        print("Applying LTC coding to diagnoses...")
+        print("Applying ICD-10 coding to diagnoses...")
         for ltc_group, codelist in tqdm(cond_dict.items()):
             # print("Group:", ltc_group, "Codes:", codelist)
             for code in codelist:
@@ -184,7 +185,7 @@ def get_diag_features(
 
     if isinstance(diagnoses, pl.LazyFrame):
         diagnoses = diagnoses.collect()
-    if isinstance(diagnoses, pl.LazyFrame):
+    if isinstance(admits_last, pl.LazyFrame):
         admits_last = admits_last.collect()
 
     code_alias = "outcome_code" if outcomes else "ltc_code"
@@ -236,13 +237,14 @@ def get_diag_features(
         )
 
     ### Merge with base patient data
-    admits_last = admits_last.join(diag_flat, on="subject_id", how="left")
+    admits_last = admits_last.join(diag_flat, on=["subject_id"], how="left")
     admits_last = admits_last.with_columns(
         [
             pl.col(col).cast(pl.Int8).fill_null(0)
             for col in diag_flat.drop(["subject_id", code_alias]).columns
         ]
     )
+    admits_last = admits_last.sort(by=["subject_id"]).unique(subset=["subject_id"], keep='last')
 
     return admits_last.lazy() if use_lazy else admits_last
 
@@ -291,7 +293,6 @@ def transform_sensitive_attributes(ed_pts: pl.DataFrame) -> pl.DataFrame:
 def prepare_medication_features(
     medications: pl.DataFrame | pl.LazyFrame,
     admits_last: pl.DataFrame | pl.LazyFrame,
-    top_n: int = 50,
     use_lazy: bool = False,
 ) -> pl.DataFrame:
     """
@@ -300,7 +301,6 @@ def prepare_medication_features(
     Args:
         medications (pl.DataFrame | pl.LazyFrame): Medication data.
         admits_last (pl.DataFrame | pl.LazyFrame): Final hospitalisations data.
-        top_n (int): Number of top medications to include.
         use_lazy (bool): If True, return a LazyFrame.
 
     Returns:
@@ -311,88 +311,74 @@ def prepare_medication_features(
     if isinstance(admits_last, pl.LazyFrame):
         admits_last = admits_last.collect()
 
-    ACEi_meds = ["benazepril", "lotensin", "captopril", "capoten", "cilazapril",
+    # Define medication patterns for vectorized search
+    med_patterns = {
+        "acei": ["benazepril", "lotensin", "captopril", "capoten", "cilazapril",
                  "inhibace", "enalapril", "vasotec", "renitec", "fosinopril", "monopril",
                  "imidapril", "tanatril", "lisinopril", "prinivil", "zestril",
                  "moexipril", "univasc", "perindopril", "coversyl", "aceon", "quinapril", "accupril",
-                 "ramipril", "altace", "tritace", "trandolapril", "mavik", "odrik", "zofenopril", "zomen"]
-    ARB_meds = ["azilsartan", "candesartan", "eprosartan", "irbesartan",
+                 "ramipril", "altace", "tritace", "trandolapril", "mavik", "odrik", "zofenopril", "zomen"],
+        "arb": ["azilsartan", "candesartan", "eprosartan", "irbesartan",
                 "losartan", "olmesartan", "telmisartan", "valsartan", "allisartan",
-                "forasartan", "saprisartan", "sparsentan"]
-    BB_meds = ["acebutolol", "sectral", "atenolol", "tenormin", "atecor", "atenomel", "atenamin", "atenix",
-                "betaxolol", "bevantolol", "bisoprolol", "bucindolol", "carvedilol", "carteolol",
-                "celiprolol", "esmolol", "labetalol", "metoprolol", "nadolol", "nebivolol",
-                "oxprenolol", "penbutolol", "pindolol", "practolol", "propranolol", "sotalol",
-                "timolol", "cardicor", "emcor", "monocor", "congescor", "coreg", "eucardic",
-                "brevibloc", "trandate", "lopressor", "betaloc", "metocor", "corgard",
-                "bedranol", "inderal", "beta-prograne", "beta-cardone", "tolerzide",
-                "timolol", "nyogel", "prestim", "glau-opt", "combigan", "betimol"]
-    DAPT_meds = ["aspirin", "acetylsalicylic", "clopidogrel", "plavix", "effient", "prasugrel",
-                 "ticagrelor", "brilinta", "dipyridamole", "cangrelor", "cilostazol"]
-    aspirin_meds = ["aspirin", "acetylsalicylic", "paracetamol", "ecotrin",
+                "forasartan", "saprisartan", "sparsentan"],
+        "bb": ["acebutolol", "sectral", "atenolol", "tenormin", "atecor", "atenomel", "atenamin", "atenix",
+               "betaxolol", "bevantolol", "bisoprolol", "bucindolol", "carvedilol", "carteolol",
+               "celiprolol", "esmolol", "labetalol", "metoprolol", "nadolol", "nebivolol",
+               "oxprenolol", "penbutolol", "pindolol", "practolol", "propranolol", "sotalol",
+               "timolol", "cardicor", "emcor", "monocor", "congescor", "coreg", "eucardic",
+               "brevibloc", "trandate", "lopressor", "betaloc", "metocor", "corgard",
+               "bedranol", "inderal", "beta-prograne", "beta_cardone", "tolerzide",
+               "timolol", "nyogel", "prestim", "glau_opt", "combigan", "betimol"],
+        "dapt": ["aspirin", "acetylsalicylic", "clopidogrel", "plavix", "effient", "prasugrel",
+                 "ticagrelor", "brilinta", "dipyridamole", "cangrelor", "cilostazol"],
+        "aspirin": ["aspirin", "acetylsalicylic", "paracetamol", "ecotrin",
                     "ascriptin", "easprin", "bayer", "halfprin", "healthprin", "measurin",
                     "bufferin", "empirin"]
+    }
 
+    # Use Polars for preprocessing
+    # Convert charttime to datetime if it's a string
+    if medications["charttime"].dtype == pl.Utf8:
+        medications = medications.with_columns(pl.col("charttime").str.to_datetime())
 
-    ### Convert to pandas for easier manipulation
-    medications = medications.to_pandas()
-    admits_last = admits_last.to_pandas()
+    # Convert edregtime to datetime if it's a string
+    if medications["edregtime"].dtype == pl.Utf8:
+        medications = medications.with_columns(pl.col("edregtime").str.to_datetime())
 
-    medications["charttime"] = pd.to_datetime(medications["charttime"])
-    medications["edregtime"] = pd.to_datetime(medications["edregtime"])
-    medications = medications[(medications["charttime"] < medications["edregtime"])]
+    # Clean medication names
+    medications = medications.with_columns(
+        pl.col("medication").str.to_lowercase().str.strip_chars().str.replace_all(" ", "_").str.replace_all("-", "_")
+    )
 
-    ### Clean and prepare medication text
-    medications["medication"] = (
-        medications["medication"]
-        .str.lower()
-        .str.strip()
-        .str.replace(" ", "_")
-        .str.replace("-", "_")
-    )
-    medications["is_acei"] = medications["medication"].apply(lambda x: 1 if x.str.contains("|".join(ACEi_meds), case=False, na=False) else 0)
-    medications["is_arb"] = medications["medication"].apply(lambda x: 1 if x.str.contains("|".join(ARB_meds), case=False, na=False) else 0)
-    medications["is_bb"] = medications["medication"].apply(lambda x: 1 if x.str.contains("|".join(BB_meds), case=False, na=False) else 0)
-    medications["is_dapt"] = medications["medication"].apply(lambda x: 1 if x.str.contains("|".join(DAPT_meds), case=False, na=False) else 0)
-    medications["is_aspirin"] = medications["medication"].apply(lambda x: 1 if x.str.contains("|".join(aspirin_meds), case=False, na=False) else 0)
+    # Filter medications before edregtime
+    medications = medications.filter(pl.col("charttime") < pl.col("edregtime"))
 
-    ### Get number of prescriptions
-    meds_ids_ace = (
-        medications.groupby(["subject_id", "is_acei", "edregtime"])
-        .size()
-        .reset_index(name="n_presc_acei")
-    )
-    meds_ids_arb = (
-        medications.groupby(["subject_id", "is_arb", "edregtime"])
-        .size()
-        .reset_index(name="n_presc_arb")
-    )
-    meds_ids_bb = (
-        medications.groupby(["subject_id", "is_bb", "edregtime"])
-        .size()
-        .reset_index(name="n_presc_bb")
-    )
-    meds_ids_dapt = (
-        medications.groupby(["subject_id", "is_dapt", "edregtime"])
-        .size()
-        .reset_index(name="n_presc_dapt")
-    )
-    meds_ids_aspirin = (
-        medications.groupby(["subject_id", "is_aspirin", "edregtime"])
-        .size()
-        .reset_index(name="n_presc_aspirin")
-    )
-    admits_last = admits_last.merge(meds_ids_ace.drop(columns=["is_acei", "edregtime"]), on="subject_id", how="left")
-    admits_last = admits_last.merge(meds_ids_arb.drop(columns=["is_arb", "edregtime"]), on="subject_id", how="left")
-    admits_last = admits_last.merge(meds_ids_bb.drop(columns=["is_bb", "edregtime"]), on="subject_id", how="left")
-    admits_last = admits_last.merge(meds_ids_dapt.drop(columns=["is_dapt", "edregtime"]), on="subject_id", how="left")
-    admits_last = admits_last.merge(meds_ids_aspirin.drop(columns=["is_aspirin", "edregtime"]), on="subject_id", how="left")
+    # Create medication class indicators using vectorized operations
+    med_class_exprs = []
+    for med_class, med_list in med_patterns.items():
+        pattern = "|".join(med_list)
+        med_class_exprs.append(
+            pl.col("medication").str.contains(pattern).cast(pl.Int8).alias(f"is_{med_class}")
+        )
 
-    ### Fill missing values
-    nums_cols = [col for col in admits_last.columns if "n_presc" in col]
-    admits_last[nums_cols] = admits_last[nums_cols].fillna(0).astype(np.int16)
-    admits_last.columns = admits_last.columns.str.replace("(", "").str.replace(")", "")
-    admits_last = pl.DataFrame(admits_last)
+    medications = medications.with_columns(med_class_exprs)
+
+    # Aggregate prescriptions by subject_id and medication class in a single operation
+    # Group by subject_id and sum all medication class indicators
+    aggregation_exprs = [pl.col(f"is_{med_class}").sum().alias(f"n_presc_{med_class}")
+                         for med_class in med_patterns.keys()]
+
+    meds_summary = medications.group_by("subject_id").agg(aggregation_exprs)
+
+    # Join with admits_last using Polars (faster than pandas)
+    admits_last = admits_last.join(meds_summary, on=["subject_id"], how="left")
+    #admits_last = admits_last.sort(by=["subject_id"]).unique(subset=["subject_id"], keep='last')
+
+    # Fill nulls and cast to Int32 to handle larger prescription counts
+    presc_cols = [f"n_presc_{med_class}" for med_class in med_patterns.keys()]
+    admits_last = admits_last.with_columns([
+        pl.col(col).fill_null(0).cast(pl.Int32) for col in presc_cols
+    ])
 
     return admits_last.lazy() if use_lazy else admits_last
 
@@ -898,22 +884,56 @@ def clean_labevents(labs_data: pl.LazyFrame) -> pl.LazyFrame:
     labs_data = labs_data.drop_nulls()
 
     # Remove outliers using 5 std from mean
+    '''
     lab_events = lab_events.with_columns(
         mean=pl.col("value").mean().over(pl.count("label"))
     )
     lab_events = lab_events.with_columns(
         std=pl.col("value").std().over(pl.count("label"))
     )
+
     lab_events = lab_events.filter(
-        (pl.col("value") <= pl.col("mean") + pl.col("std") * 5)
-        & (pl.col("value") >= pl.col("mean") - pl.col("std") * 5)
+        (pl.col("value") <= pl.col("mean") + pl.col("std") * 100)
+        & (pl.col("value") >= pl.col("mean") - pl.col("std") * 100)
     ).drop(["mean", "std"])
+    '''
+
+    lab_troponin = lab_events.filter(pl.col("label").str.contains("troponin"))
+    print(f"Total troponin measurements: {lab_troponin.height}")
+
+    #lab_events = lab_events.collect(streaming=True)
 
     # Cardiovascular-specific lab value cleaning
     lab_events = clean_specific_lab_values(lab_events)
 
     # Extract troponin T measures
     lab_events = extract_troponin_t_measures(lab_events)
+
+    # Replace overlapping lab labels
+    lab_events = lab_events.with_columns(
+        pl.when(pl.col("label").is_in(['white_blood_cells', 'wbc', 'wbc_count']))
+        .then(pl.lit('wbc'))
+        .otherwise(pl.col("label"))
+        .alias("label")
+    )
+    lab_events = lab_events.with_columns(
+        pl.when(pl.col("label").is_in(['estimated_gfr_(mdrd equation)', 'egfr', 'gfr', 'egfr_(ckd-epi)']))
+        .then(pl.lit('eGFR'))
+        .otherwise(pl.col("label"))
+        .alias("label")
+    )
+    lab_events = lab_events.with_columns(
+        pl.when(pl.col("label").is_in(['creatine_kinase_(ck)', 'ck', 'creatine_kinase']))
+        .then(pl.lit('creatine_kinase'))
+        .otherwise(pl.col("label"))
+        .alias("label")
+    )
+    lab_events = lab_events.with_columns(
+        pl.when(pl.col("label").is_in(['creatine_kinase_mb isoenzyme', 'ck-mb', 'ck_mb', 'creatine_kinase_mb']))
+        .then(pl.lit('creatine_kinase_mb'))
+        .otherwise(pl.col("label"))
+        .alias("label")
+    )
 
     return lab_events
 
@@ -931,11 +951,17 @@ def clean_specific_lab_values(labs_data: pl.LazyFrame) -> pl.LazyFrame:
 
     ## Troponin T
     cleaned_data = labs_data.with_columns(
-        pl.when(pl.col("label") == "Troponin T")
+        pl.when(pl.col("label") == "troponin_t")
         .then(
-            pl.when(pl.col("value").isna() & pl.col("comments").str.startswith(('<', 'LESS')))
+            pl.when(
+                pl.col("value").is_nan() &
+                (pl.col("comments").str.starts_with('<') | pl.col("comments").str.contains('(?i)LESS'))
+            )
             .then(0.01)
-            .when(pl.col("value").isna() & pl.col("comments").str.startswith(('>', 'GREATER')))
+            .when(
+                pl.col("value").is_nan() &
+                (pl.col("comments").str.starts_with('>') | pl.col("comments").str.contains('(?i)GREATER'))
+            )
             .then(25)
             .otherwise(pl.col("value"))
         )
@@ -947,9 +973,9 @@ def clean_specific_lab_values(labs_data: pl.LazyFrame) -> pl.LazyFrame:
     cleaned_data = cleaned_data.with_columns(
         pl.when(pl.col("label").str.contains("hemoglobin"))
         .then(
-            pl.when(pl.col("value").isna() & pl.col("comments").str.contains("(?i)<|less"))
+            pl.when(pl.col("value").is_nan() & pl.col("comments").str.contains("(?i)<|less"))
             .then(3.0)  # Lower detection limit
-            .when(pl.col("value").isna() & pl.col("comments").str.contains("(?i)>|greater"))
+            .when(pl.col("value").is_nan() & pl.col("comments").str.contains("(?i)>|greater"))
             .then(25.0)  # Upper detection limit
             .when(pl.col("value") < 2.0)
             .then(None)  # Below physiological minimum
@@ -967,9 +993,9 @@ def clean_specific_lab_values(labs_data: pl.LazyFrame) -> pl.LazyFrame:
     cleaned_data = cleaned_data.with_columns(
         pl.when(pl.col("label").str.contains("gfr"))
         .then(
-            pl.when(pl.col("value").isna() & pl.col("comments").str.contains("(?i)<|less"))
+            pl.when(pl.col("value").is_nan() & pl.col("comments").str.contains("(?i)<|less"))
             .then(5.0)  # Lower detection limit
-            .when(pl.col("value").isna() & pl.col("comments").str.contains("(?i)>|greater"))
+            .when(pl.col("value").is_nan() & pl.col("comments").str.contains("(?i)>|greater"))
             .then(150.0)  # Upper detection limit
             .when(pl.col("comments").str.contains("(?i)>60|greater.*60"))
             .then(90.0)  # Use midpoint for >60 reporting
@@ -1005,7 +1031,7 @@ def extract_troponin_t_measures(labs_data: pl.LazyFrame) -> pl.LazyFrame:
     """
     # Filter for troponin T measurements and ensure required columns exist
     troponin_data = labs_data.filter(
-        pl.col("label").str.contains("Troponin T")
+        pl.col("label").str.contains("troponin_t")
     ).filter(
         pl.col("value").is_not_null() &
         pl.col("hadm_id").is_not_null() &
@@ -1046,8 +1072,6 @@ def extract_troponin_t_measures(labs_data: pl.LazyFrame) -> pl.LazyFrame:
     )
 
     # Create new rows for each troponin feature
-    # Get template columns from original data (excluding the specific columns we're creating)
-    template_cols = [col for col in labs_data.columns if col not in ["label", "value"]]
 
     # Create base template with required columns filled from troponin_features
     base_template = troponin_features.select([
@@ -1056,9 +1080,6 @@ def extract_troponin_t_measures(labs_data: pl.LazyFrame) -> pl.LazyFrame:
         pl.col("base_charttime").alias("charttime"),
         pl.lit(None).alias("comments")  # Add comments column if it exists in original
     ])
-
-    # Create individual feature rows
-    feature_rows = []
 
     # First troponin T
     first_troponin_rows = base_template.join(
@@ -1125,6 +1146,11 @@ def extract_troponin_t_measures(labs_data: pl.LazyFrame) -> pl.LazyFrame:
 
     # Ensure column order matches original
     all_troponin_features = all_troponin_features.select(labs_data.columns)
+
+    # Convert charttime back to String to match original labs_data format
+    all_troponin_features = all_troponin_features.with_columns(
+        pl.col("charttime").cast(pl.Utf8).alias("charttime")
+    )
 
     # Append new troponin feature rows to original labs_data
     enhanced_labs_data = pl.concat([labs_data, all_troponin_features], how="vertical")
