@@ -44,7 +44,7 @@
       <td>20694 (50)</td>
       <td>20512 (50)</td>
       <td>182 (42)</td>
-      <td>0.086</td>
+      <td>0.097</td>
       <td>Chi-squared</td>
     </tr>
     <tr>
@@ -183,36 +183,18 @@
       <td>3 [2,5]</td>
       <td>3 [2,5]</td>
       <td>4 [2,6]</td>
-      <td>0.070</td>
+      <td>0.079</td>
       <td>Kruskal-Wallis</td>
     </tr>
     <tr>
-      <th rowspan="5" valign="top">Mode of ED Arrival, n (%)</th>
+      <th rowspan="3" valign="top">Mode of ED Arrival, n (%)</th>
       <th>AMBULANCE</th>
       <td></td>
-      <td>23783 (57)</td>
-      <td>23506 (57)</td>
-      <td>277 (64)</td>
+      <td>24124 (58)</td>
+      <td>23834 (58)</td>
+      <td>290 (67)</td>
       <td>&lt;0.001</td>
-      <td>Chi-squared (warning: expected count &lt; 5)</td>
-    </tr>
-    <tr>
-      <th>HELICOPTER</th>
-      <td></td>
-      <td>263 (1)</td>
-      <td>251 (1)</td>
-      <td>12 (3)</td>
-      <td></td>
-      <td></td>
-    </tr>
-    <tr>
-      <th>OTHER</th>
-      <td></td>
-      <td>78 (0)</td>
-      <td>77 (0)</td>
-      <td>1 (0)</td>
-      <td></td>
-      <td></td>
+      <td>Chi-squared</td>
     </tr>
     <tr>
       <th>UNKNOWN</th>
@@ -236,8 +218,8 @@
       <th rowspan="2" valign="top">ECG Normal, n (%)</th>
       <th>No</th>
       <td></td>
-      <td>14351 (35)</td>
-      <td>14095 (34)</td>
+      <td>14350 (35)</td>
+      <td>14094 (34)</td>
       <td>256 (59)</td>
       <td>&lt;0.001</td>
       <td>Chi-squared</td>
@@ -245,8 +227,8 @@
     <tr>
       <th>Yes</th>
       <td></td>
-      <td>27025 (65)</td>
-      <td>26850 (66)</td>
+      <td>27026 (65)</td>
+      <td>26851 (66)</td>
       <td>175 (41)</td>
       <td></td>
       <td></td>
@@ -334,7 +316,7 @@
       <td>35874 (87)</td>
       <td>35481 (87)</td>
       <td>393 (91)</td>
-      <td>0.460</td>
+      <td>0.518</td>
       <td>Chi-squared</td>
     </tr>
     <tr>
@@ -364,6 +346,86 @@
       <td>1 (0)</td>
       <td></td>
       <td></td>
+    </tr>
+    <tr>
+      <th>Ventricular rate (bpm), median [Q1,Q3]</th>
+      <th></th>
+      <td>0</td>
+      <td>81 [69,97]</td>
+      <td>81 [69,97]</td>
+      <td>77 [66,90]</td>
+      <td>0.001</td>
+      <td>Kruskal-Wallis</td>
+    </tr>
+    <tr>
+      <th>PR Interval (ms), median [Q1,Q3]</th>
+      <th></th>
+      <td>3287</td>
+      <td>157 [139,178]</td>
+      <td>157 [139,178]</td>
+      <td>163 [146,187]</td>
+      <td>0.006</td>
+      <td>Kruskal-Wallis</td>
+    </tr>
+    <tr>
+      <th>QRS Duration (ms), median [Q1,Q3]</th>
+      <th></th>
+      <td>62</td>
+      <td>94 [86,107]</td>
+      <td>94 [86,106]</td>
+      <td>98 [88,112]</td>
+      <td>0.004</td>
+      <td>Kruskal-Wallis</td>
+    </tr>
+    <tr>
+      <th>QT Interval (ms), median [Q1,Q3]</th>
+      <th></th>
+      <td>54</td>
+      <td>387 [353,422]</td>
+      <td>387 [353,422]</td>
+      <td>404 [368,435]</td>
+      <td>&lt;0.001</td>
+      <td>Kruskal-Wallis</td>
+    </tr>
+    <tr>
+      <th>QTc Interval (ms), median [Q1,Q3]</th>
+      <th></th>
+      <td>54</td>
+      <td>447 [427,472]</td>
+      <td>447 [427,472]</td>
+      <td>453 [431,480]</td>
+      <td>0.041</td>
+      <td>Kruskal-Wallis</td>
+    </tr>
+    <tr>
+      <th>P Axis (deg), median [Q1,Q3]</th>
+      <th></th>
+      <td>24875</td>
+      <td>54 [36,66]</td>
+      <td>54 [36,66]</td>
+      <td>51 [33,67]</td>
+      <td>1.000</td>
+      <td>Kruskal-Wallis</td>
+    </tr>
+    <tr>
+      <th>QRS Axis (deg), median [Q1,Q3]</th>
+      <th></th>
+      <td>478</td>
+      <td>14 [-16,47]</td>
+      <td>14 [-16,47]</td>
+      <td>5 [-28,39]</td>
+      <td>0.007</td>
+      <td>Kruskal-Wallis</td>
+    </tr>
+    <tr>
+      <th>T Axis (deg), median [Q1,Q3]</th>
+      <th></th>
+      <td>1199</td>
+      <td>43 [18,68]</td>
+      <td>43 [18,68]</td>
+      <td>51 [18,79]</td>
+      <td>0.863</td>
+      <td>Kruskal-Wallis</td>
     </tr>
     <tr>
       <th rowspan="2" valign="top">Ischaemic Heart Disease, n (%)</th>
@@ -486,7 +548,7 @@
       <td>28428 (69)</td>
       <td>28092 (69)</td>
       <td>336 (78)</td>
-      <td>0.002</td>
+      <td>0.003</td>
       <td>Chi-squared</td>
     </tr>
     <tr>
@@ -619,7 +681,7 @@
       <td>35416 (86)</td>
       <td>35027 (86)</td>
       <td>389 (90)</td>
-      <td>0.436</td>
+      <td>0.492</td>
       <td>Chi-squared</td>
     </tr>
     <tr>
@@ -733,7 +795,7 @@
       <td>38707 (94)</td>
       <td>38286 (94)</td>
       <td>421 (98)</td>
-      <td>0.041</td>
+      <td>0.046</td>
       <td>Chi-squared</td>
     </tr>
     <tr>
@@ -752,7 +814,7 @@
       <td>30003 (73)</td>
       <td>29665 (72)</td>
       <td>338 (78)</td>
-      <td>0.426</td>
+      <td>0.480</td>
       <td>Chi-squared</td>
     </tr>
     <tr>
@@ -858,7 +920,7 @@
       <td>98.00 [97.00,99.00]</td>
       <td>98.00 [97.00,99.00]</td>
       <td>98.00 [96.00,99.00]</td>
-      <td>0.009</td>
+      <td>0.010</td>
       <td>Kruskal-Wallis</td>
     </tr>
     <tr>
@@ -928,7 +990,7 @@
       <td>50.42 [36.41,75.63]</td>
       <td>50.42 [36.41,75.63]</td>
       <td>58.82 [47.62,81.23]</td>
-      <td>0.871</td>
+      <td>0.981</td>
       <td>Kruskal-Wallis</td>
     </tr>
     <tr>
@@ -998,7 +1060,7 @@
       <td>17.00 [14.88,19.00]</td>
       <td>17.00 [15.00,19.00]</td>
       <td>15.00 [13.50,17.00]</td>
-      <td>0.015</td>
+      <td>0.017</td>
       <td>Kruskal-Wallis</td>
     </tr>
     <tr>
@@ -1028,7 +1090,7 @@
       <td>37722 (91)</td>
       <td>37311 (91)</td>
       <td>411 (95)</td>
-      <td>0.172</td>
+      <td>0.194</td>
       <td>Chi-squared</td>
     </tr>
     <tr>
@@ -1085,7 +1147,7 @@
       <td>34337 (83)</td>
       <td>33959 (83)</td>
       <td>378 (88)</td>
-      <td>0.670</td>
+      <td>0.755</td>
       <td>Chi-squared</td>
     </tr>
     <tr>

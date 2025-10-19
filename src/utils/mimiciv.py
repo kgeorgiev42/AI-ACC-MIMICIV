@@ -115,6 +115,13 @@ def read_admissions_table(
     ed_stays = ed_stays.sort(by=["subject_id", "hadm_id", "intime"])
     ed_stays = ed_stays.unique(subset=["hadm_id"], keep="last")
     ed_stays = ed_stays.rename({"stay_id": "ed_stay_id", "intime": "ed_intime"})
+    ## Recode arrival modes
+    ed_stays = ed_stays.with_columns(
+        pl.when(pl.col('arrival_transport').is_in(['HELICOPTER', 'OTHER']))
+        .then(pl.lit('AMBULANCE'))
+        .otherwise(pl.col('arrival_transport'))
+        .alias('arrival_transport')
+    )
     admits = admits.join(ed_stays, on=["subject_id", "hadm_id"], how="left")
     admits = admits.filter(pl.col("ed_stay_id").is_not_null())
     admits = admits.with_columns(pl.col("ed_stay_id").cast(pl.Int64))
@@ -379,7 +386,7 @@ def read_ecg_measurements(
         pl.col("rr_interval").cast(pl.Float64, strict=False)
     )
 
-    # Estimate additional ECG features using Polars syntax
+    # Estimate additional ECG measures using Polars syntax
     ecg_measures = ecg_measures.with_columns([
         (pl.col("rr_interval") / 1000).alias("rr_interval_seconds"),
         (pl.col("qrs_onset") - pl.col("p_onset")).alias("pr_interval"),
@@ -448,7 +455,7 @@ def read_ecg_measurements(
         .alias("t_axis")
     ])
 
-    ecg_measures = ecg_measures.with_columns([pl.col(col).fill_null(-1) for col in ['p_axis', 'qrs_axis', 't_axis', 'pr_interval', 'p_wave_duration', 'qrs_duration', 'qt_interval', 'ventricular_rate', 'qtc_interval']])
+    #ecg_measures = ecg_measures.with_columns([pl.col(col).fill_null(-1) for col in ['p_axis', 'qrs_axis', 't_axis', 'pr_interval', 'p_wave_duration', 'qrs_duration', 'qt_interval', 'ventricular_rate', 'qtc_interval']])
 
     ## Diagnostics
     # Create full_report by merging all report columns (report_0 to report_17)
@@ -512,7 +519,9 @@ def read_ecg_measurements(
     ecg_measures = add_ecg_indicator(ecg_measures, "ecg_acute_mi", acute_mi_pattern)
 
     # Merge with admissions data to filter relevant ECGs
-    ecg_admits = admissions_data.join(ecg_measures.select(["subject_id", "ecg_time", "full_report", "ecg_normal", "ecg_st_elevation", "ecg_myocardial_ischemia", "ecg_acute_mi"]), on="subject_id", how="left")
+    ecg_admits = admissions_data.join(ecg_measures.select(["subject_id", "ecg_time", "full_report", "ecg_normal", "ecg_st_elevation", "ecg_myocardial_ischemia", "ecg_acute_mi",
+                                                           "ventricular_rate", "pr_interval", "qrs_duration", "qt_interval", "qtc_interval",
+                                                           "p_axis", "qrs_axis", "t_axis"]), on="subject_id", how="left")
 
     # Filter the ECGs to keep only those within 3 hours after ED presentation using Polars
     ecg_admits = ecg_admits.filter(
