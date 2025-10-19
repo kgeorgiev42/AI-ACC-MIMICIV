@@ -45,8 +45,8 @@ Additional linked datasets may include [MIMIC-IV-ED](https://physionet.org/conte
 ### Roadmap
 
 - [x] Setting up base code repository
-- [ ] Configuring project environment and packages
-- [ ] Developing feature extraction code for prediction of acute cardiac conditions
+- [x] Configuring project environment and packages
+- [In progress] Developing feature extraction code for prediction of acute cardiac conditions
 - [ ] Developing and testing unimodal deep learning pipelines with ECG/CXR data
 - [ ] Developing and testing multimodal deep learning pipelines with fusion of EHR/ECG/CXR data
 - [ ] Developing module for performance assessment and calibration
