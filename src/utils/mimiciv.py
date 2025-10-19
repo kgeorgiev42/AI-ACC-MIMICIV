@@ -280,6 +280,45 @@ def read_icu_table(
     print("Collected ICU stay outcomes..")
     return icu_eps.lazy() if use_lazy else icu_eps
 
+### ECG detection patterns ###
+ACUTE_MI_PATTERN = re.compile(
+    r'\b('
+    r'(acute\s+(myocardial\s+)?infarction)'      # acute MI or acute myocardial infarction
+    r'|(st[-\s]*elevation\s+mi)'                 # STEMI full form
+    r'|(non[-\s]*st[-\s]*elevation\s+mi)'        # NSTEMI full form
+    r'|(\bstemi\b)'                              # STEMI abbreviation
+    r'|(\bnstemi\b)'                             # NSTEMI abbreviation
+    r'|(q[-\s]*wave\s+mi)'                       # older term Q-wave MI
+    r'|(subendocardial\s+(mi|infarction))'       # subendocardial MI (NSTEMI equivalent)
+    r')\b',
+    flags=re.IGNORECASE
+)
+
+ISCHEMIA_PATTERN = re.compile(
+    r'\b('
+    r'(st[-\s]?segment\s?(depression|elevation|changes|shift))|'  # ST-segment changes
+    r'(t[-\s]?wave\s?(inversion|flattening|abnormality))|'        # T-wave issues
+    r'(q[-\s]?wave\s?(abnormality|pathological))|'                # Pathological Q waves
+    r'((subendocardial|transmural)\s?ischemi(a|c))|'              # Variants of ischemia
+    r'(\bischemi(a|c)\b)|'                                        # Generic ischemia mentions
+    r'(unstable\sangina)|'                                        # Unstable angina pattern
+    r'(nste(\s|-)?acs|nstemi)'                                    # NSTEMI or NSTE-ACS
+    r')\b',
+    flags=re.IGNORECASE
+)
+
+ST_ELEVATION_PATTERN = re.compile(r"""
+\b(
+    ST[\s\-]?elev(?:ation|ated|ating|s)? |      # “ST elevation”, “ST-elevated”, etc.
+    ST[\s\-]?segment[\s\-]elev(?:ation|ated|s)? |  # “ST-segment elevation”
+    STEMI |                                       # Explicit STEMI mention
+    (acute\s+myocardial\s+infarction) |          # Phrases like “acute myocardial infarction”
+    (elevation\s+in\s+[Vv]\d+(-[Vv]\d+)?) |      # e.g., “elevation in V2-V4”
+    (marked\s+ST\s+changes?) |                   # “marked ST changes”
+    (concave\s+ST\s+segments?) |                 # morphological variant
+    (convex\s+ST\s+segments?)                    # morphological variant
+)\b
+""", flags=re.IGNORECASE | re.VERBOSE)
 
 def read_ecg_measurements(
     mimic4_ecg_path: str,
@@ -450,27 +489,30 @@ def read_ecg_measurements(
         )
         .then(1)
         .otherwise(0)
-        .alias("ecg_normal"),
-
-        pl.when(
-            pl.col("full_report").is_not_null() &
-            pl.col("full_report").str.contains("elevat")
-        )
-        .then(1)
-        .otherwise(0)
-        .alias("ecg_st_elevation"),
-
-        pl.when(
-            pl.col("full_report").is_not_null() &
-            pl.col("full_report").str.contains("ischemia")
-        )
-        .then(1)
-        .otherwise(0)
-        .alias("ecg_myocardial_ischemia")
+        .alias("ecg_normal")
     ])
 
+    # Use regex patterns to identify ST-elevation and myocardial ischemia
+    # Use compiled regex patterns from module level
+    acute_mi_pattern = ACUTE_MI_PATTERN
+    ischemia_pattern = ISCHEMIA_PATTERN
+    st_elevation_pattern = ST_ELEVATION_PATTERN
+
+    # Helper function for indicator columns using Python regex search
+    def add_ecg_indicator(df, col_name, pattern):
+        return df.with_columns(
+            pl.col("full_report")
+            .apply(lambda s: 1 if (s is not None and pattern.search(s)) else 0)
+            .cast(pl.Int8)
+            .alias(col_name)
+        )
+
+    ecg_measures = add_ecg_indicator(ecg_measures, "ecg_st_elevation", st_elevation_pattern)
+    ecg_measures = add_ecg_indicator(ecg_measures, "ecg_myocardial_ischemia", ischemia_pattern)
+    ecg_measures = add_ecg_indicator(ecg_measures, "ecg_acute_mi", acute_mi_pattern)
+
     # Merge with admissions data to filter relevant ECGs
-    ecg_admits = admissions_data.join(ecg_measures.select(["subject_id", "ecg_time", "full_report", "ecg_normal", "ecg_st_elevation", "ecg_myocardial_ischemia"]), on="subject_id", how="left")
+    ecg_admits = admissions_data.join(ecg_measures.select(["subject_id", "ecg_time", "full_report", "ecg_normal", "ecg_st_elevation", "ecg_myocardial_ischemia", "ecg_acute_mi"]), on="subject_id", how="left")
 
     # Filter the ECGs to keep only those within 3 hours after ED presentation using Polars
     ecg_admits = ecg_admits.filter(
@@ -525,6 +567,7 @@ def read_ecg_measurements(
         print(f'Number of attendances with normal ECG: {ecg_admits.filter(pl.col("ecg_normal") == 1).select("subject_id").n_unique()}, % of pts: {ecg_admits.filter(pl.col("ecg_normal") == 1).select("subject_id").n_unique() / ecg_admits.select("subject_id").n_unique() * 100:.2f}')
         print(f'Number of attendances with ST-elevation: {ecg_admits.filter(pl.col("ecg_st_elevation") == 1).select("subject_id").n_unique()}, % of pts: {ecg_admits.filter(pl.col("ecg_st_elevation") == 1).select("subject_id").n_unique() / ecg_admits.select("subject_id").n_unique() * 100:.2f}')
         print(f'Number of attendances with myocardial ischemia: {ecg_admits.filter(pl.col("ecg_myocardial_ischemia") == 1).select("subject_id").n_unique()}, % of pts: {ecg_admits.filter(pl.col("ecg_myocardial_ischemia") == 1).select("subject_id").n_unique() / ecg_admits.select("subject_id").n_unique() * 100:.2f}')
+        print(f'Number of attendances with suspected MI: {ecg_admits.filter(pl.col("ecg_acute_mi") == 1).select("subject_id").n_unique()}, % of pts: {ecg_admits.filter(pl.col("ecg_acute_mi") == 1).select("subject_id").n_unique() / ecg_admits.select("subject_id").n_unique() * 100:.2f}')
 
     print("Collected ECG measurements table..")
     return ecg_admits.lazy() if use_lazy else ecg_admits
@@ -648,9 +691,9 @@ def read_procedures_table(
             proc_dict = json.load(json_dict)
 
         pci_list = proc_dict.get("proc_PCI", [])
-        cabg_list = proc_dict.get("proc_CABG", [])
+        cag_list = proc_dict.get("proc_CAG", [])
         pci_pat = "|".join(re.escape(x) for x in pci_list) if pci_list else r"^$"
-        cabg_pat = "|".join(re.escape(x) for x in cabg_list) if cabg_list else r"^$"
+        cag_pat = "|".join(re.escape(x) for x in cag_list) if cag_list else r"^$"
 
         proc = proc.with_columns([
             pl.when(pl.col("icd_code").is_not_null() & pl.col("icd_code").str.contains(pci_pat))
@@ -659,31 +702,31 @@ def read_procedures_table(
             .cast(pl.Int8)
             .alias("proc_PCI"),
 
-            pl.when(pl.col("icd_code").is_not_null() & pl.col("icd_code").str.contains(cabg_pat))
+            pl.when(pl.col("icd_code").is_not_null() & pl.col("icd_code").str.contains(cag_pat))
             .then(1)
             .otherwise(0)
             .cast(pl.Int8)
-            .alias("proc_CABG")
+            .alias("proc_CAG")
         ])
 
         adm_last = adm_last.join(
-            proc.select(['subject_id', 'proc_PCI', 'proc_CABG']),
+            proc.select(['subject_id', 'proc_PCI', 'proc_CAG']),
             on=['subject_id'],
             how='left'
         )
         adm_last = adm_last.with_columns(
-            ((pl.col('proc_PCI') == 1) | (pl.col('proc_CABG') == 1)).cast(pl.Int8).alias('prev_revasc')
+            ((pl.col('proc_PCI') == 1) | (pl.col('proc_CAG') == 1)).cast(pl.Int8).alias('prev_revasc')
         )
         adm_last = adm_last.with_columns([
             pl.col('proc_PCI').fill_null(0).cast(pl.Int8),
-            pl.col('proc_CABG').fill_null(0).cast(pl.Int8),
+            pl.col('proc_CAG').fill_null(0).cast(pl.Int8),
             pl.col('prev_revasc').fill_null(0).cast(pl.Int8)
         ])
         adm_last = adm_last.sort(by=["subject_id", "hadm_id"]).unique(subset=["subject_id"], keep="last")
 
     if verbose:
         print(f'Number of attendances with prior PCI: {adm_last.filter(pl.col("proc_PCI") == 1).select("subject_id").n_unique()}, % of pts: {adm_last.filter(pl.col("proc_PCI") == 1).select("subject_id").n_unique() / adm_last.select("subject_id").n_unique() * 100:.2f}')
-        print(f'Number of attendances with prior CABG: {adm_last.filter(pl.col("proc_CABG") == 1).select("subject_id").n_unique()}, % of pts: {adm_last.filter(pl.col("proc_CABG") == 1).select("subject_id").n_unique() / adm_last.select("subject_id").n_unique() * 100:.2f}')
+        print(f'Number of attendances with prior CAG: {adm_last.filter(pl.col("proc_CAG") == 1).select("subject_id").n_unique()}, % of pts: {adm_last.filter(pl.col("proc_CAG") == 1).select("subject_id").n_unique() / adm_last.select("subject_id").n_unique() * 100:.2f}')
 
     print("Collected prior procedures...")
     return adm_last.lazy() if use_lazy else adm_last
@@ -929,14 +972,10 @@ def read_labevents_table(
     # get eligible lab tests prior to current episode
     labs_data = labs_data.join(
         admits_last[["subject_id", "hadm_id", "edregtime"]]
-        .lazy()
-        .with_columns(
-            edregtime=pl.col("edregtime").cast(pl.Datetime)
-        ),
+        .lazy(),
         how="left",
         on=["subject_id", "hadm_id"],
     )
-    labs_data = labs_data.collect(streaming=True)
     labs_data = labs_data.filter((pl.col("charttime") <= pl.col("edregtime") + pl.duration(hours=3)))
     labs_data = labs_data.drop(["edregtime"])
     # get most common items (top 50 itemids by label)
@@ -950,11 +989,12 @@ def read_labevents_table(
             lab_items = list(f.read().splitlines())
 
     labs_data = labs_data.filter(
-            pl.col("itemid").cast(pl.Utf8).is_in(set(lab_items))
-        )
-    labs_data = clean_labevents(labs_data)
+        pl.col("itemid").cast(pl.Utf8).is_in(set(lab_items))
+    )
+    labs_data = labs_data.collect(streaming=True)
     labs_data = labs_data.sort(by=["subject_id", "hadm_id", "charttime"])
-    labs_data = labs_data.drop("comments", "hadm_id")
+    labs_data = clean_labevents(labs_data)
+    labs_data = labs_data.drop(["comments", "hadm_id"])
 
     return labs_data
 
@@ -1001,6 +1041,11 @@ def merge_events_table(
     )
     # vitals = pl.DataFrame(vitals)
     vitals = vitals.with_columns(pl.col("charttime").cast(pl.String))
+
+    # Ensure labs also has charttime as String to match vitals
+    if labs.schema["charttime"] != pl.Utf8:
+        labs = labs.with_columns(pl.col("charttime").cast(pl.String))
+
     events = labs.vstack(vitals)
     if verbose:
         print(

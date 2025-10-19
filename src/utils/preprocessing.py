@@ -244,6 +244,19 @@ def get_diag_features(
             for col in diag_flat.drop(["subject_id", code_alias]).columns
         ]
     )
+
+    if outcomes:
+        ### Estimate suspected MI outcome from diagnoses and ECG reports
+        admits_last = admits_last.with_columns(
+            pl.when(
+                (pl.col("ecg_acute_mi") == 1) |
+                (pl.col("outcome_AcuteMI") == 1)
+            )
+            .then(1)
+            .otherwise(0)
+            .alias("outcome_SuspectedMI")
+        )
+
     admits_last = admits_last.sort(by=["subject_id"]).unique(subset=["subject_id"], keep='last')
 
     return admits_last.lazy() if use_lazy else admits_last
@@ -861,7 +874,7 @@ def clean_labevents(labs_data: pl.LazyFrame) -> pl.LazyFrame:
     Returns:
         pl.LazyFrame: Cleaned lab events.
     """
-    labs_data = labs_data.with_columns(
+    lab_events = labs_data.with_columns(
         pl.col("label")
         .str.to_lowercase()
         .str.replace(" ", "_")
@@ -870,7 +883,9 @@ def clean_labevents(labs_data: pl.LazyFrame) -> pl.LazyFrame:
         .str.replace(" ", "_"),
         pl.col("charttime").cast(pl.Utf8).str.replace("T", " ").str.strip_chars(),
     )
-    lab_events = labs_data.with_columns(
+
+    #lab_events = lab_events.collect(streaming=True)
+    lab_events = lab_events.with_columns(
         value=pl.when(pl.col("value") == ".").then(None).otherwise(pl.col("value"))
     )
     lab_events = lab_events.with_columns(
@@ -881,10 +896,11 @@ def clean_labevents(labs_data: pl.LazyFrame) -> pl.LazyFrame:
             pl.Float64, strict=False
         )  # Attempt to cast to Float64, set invalid values to None
     )
+    '''
     labs_data = labs_data.drop_nulls()
 
     # Remove outliers using 5 std from mean
-    '''
+
     lab_events = lab_events.with_columns(
         mean=pl.col("value").mean().over(pl.count("label"))
     )
@@ -898,9 +914,6 @@ def clean_labevents(labs_data: pl.LazyFrame) -> pl.LazyFrame:
     ).drop(["mean", "std"])
     '''
 
-    lab_troponin = lab_events.filter(pl.col("label").str.contains("troponin"))
-    print(f"Total troponin measurements: {lab_troponin.height}")
-
     #lab_events = lab_events.collect(streaming=True)
 
     # Cardiovascular-specific lab value cleaning
@@ -908,6 +921,8 @@ def clean_labevents(labs_data: pl.LazyFrame) -> pl.LazyFrame:
 
     # Extract troponin T measures
     lab_events = extract_troponin_t_measures(lab_events)
+    lab_events = lab_events.drop_nulls(subset=['subject_id', 'charttime', 'itemid', 'label',
+                                               'value'])
 
     # Replace overlapping lab labels
     lab_events = lab_events.with_columns(
@@ -954,35 +969,61 @@ def clean_specific_lab_values(labs_data: pl.LazyFrame) -> pl.LazyFrame:
         pl.when(pl.col("label") == "troponin_t")
         .then(
             pl.when(
-                pl.col("value").is_nan() &
-                (pl.col("comments").str.starts_with('<') | pl.col("comments").str.contains('(?i)LESS'))
+                (pl.col("value").is_null()) &
+                (pl.col("comments").str.starts_with('<0.01.'))
             )
-            .then(0.01)
+            .then(0.005)
             .when(
-                pl.col("value").is_nan() &
-                (pl.col("comments").str.starts_with('>') | pl.col("comments").str.contains('(?i)GREATER'))
+                (pl.col("value").is_null()) &
+                (pl.col("comments").str.starts_with('cTropnT > 0.10') | pl.col("comments").str.starts_with('CTROPNT > 0.10'))
             )
-            .then(25)
+            .then(0.10)
             .otherwise(pl.col("value"))
         )
         .otherwise(pl.col("value"))
         .alias("value")
     )
 
-    # Hemoglobin specific cleaning
+    # Creatinine specific cleaning
     cleaned_data = cleaned_data.with_columns(
-        pl.when(pl.col("label").str.contains("hemoglobin"))
+        pl.when(pl.col("label").str.contains("creatinine"))
         .then(
-            pl.when(pl.col("value").is_nan() & pl.col("comments").str.contains("(?i)<|less"))
-            .then(3.0)  # Lower detection limit
-            .when(pl.col("value").is_nan() & pl.col("comments").str.contains("(?i)>|greater"))
-            .then(25.0)  # Upper detection limit
-            .when(pl.col("value") < 2.0)
+            pl.when(pl.col("value") < 0.1)
             .then(None)  # Below physiological minimum
-            .when(pl.col("value") > 25.0)
-            .then(None)  # Above physiological maximum
-            .when((pl.col("value") >= 100) & (pl.col("value") <= 250))
-            .then(pl.col("value") / 10)  # Convert g/L to g/dL
+            .when(pl.col("value") > 15)
+            .then(None)  # Above physiological maximum (normal: 0.6-1.2 mg/dL)
+            .when((pl.col("value") >= 50) & (pl.col("value") <= 2000))
+            .then(pl.col("value") / 88.4)  # Convert µmol/L to mg/dL
+            .otherwise(pl.col("value"))
+        )
+        .otherwise(pl.col("value"))
+        .alias("value")
+    )
+
+    # Urea Nitrogen (BUN) specific cleaning
+    cleaned_data = cleaned_data.with_columns(
+        pl.when(pl.col("label").str.contains("urea_nitrogen"))
+        .then(
+            pl.when(pl.col("value") < 1.0)
+            .then(None)  # Below physiological minimum
+            .when(pl.col("value") > 190.0)
+            .then(None)  # Above physiological maximum (normal: 7-20 mg/dL)
+            .when((pl.col("value") >= 1.8) & (pl.col("value") <= 71.4))
+            .then(pl.col("value") / 0.357)  # Convert mmol/L to mg/dL
+            .otherwise(pl.col("value"))
+        )
+        .otherwise(pl.col("value"))
+        .alias("value")
+    )
+
+    # Creatine Kinase MB (CK-MB) specific cleaning
+    cleaned_data = cleaned_data.with_columns(
+        pl.when(pl.col("label").str.contains("(?i)CK-MB Index|Creatine Kinase, MB Isoenzyme|Creatine Kinase, Isoenzyme MB"))
+        .then(
+            pl.when(pl.col("value") < 0)
+            .then(None)  # Below physiological minimum
+            .when(pl.col("value") > 300.0)
+            .then(None)  # Above physiological maximum (normal: 0-3 ng/mL or 0-25 U/L)
             .otherwise(pl.col("value"))
         )
         .otherwise(pl.col("value"))
@@ -990,13 +1031,16 @@ def clean_specific_lab_values(labs_data: pl.LazyFrame) -> pl.LazyFrame:
     )
 
     # eGFR specific cleaning
+    egfr_pattern = r"(?i)(?:eGFR|estimated\s+GFR)[^0-9><]*(?:=|is likely|is approximately|:)?\s*(?:between\s*)?([><]?\s*\d+(?:\.\d+)?)(?:\s*(?:and|-|to)\s*([><]?\s*\d+(?:\.\d+)?))?"
+
     cleaned_data = cleaned_data.with_columns(
-        pl.when(pl.col("label").str.contains("gfr"))
+        pl.when(pl.col("label").str.contains("(?i)gfr"))
         .then(
-            pl.when(pl.col("value").is_nan() & pl.col("comments").str.contains("(?i)<|less"))
-            .then(5.0)  # Lower detection limit
-            .when(pl.col("value").is_nan() & pl.col("comments").str.contains("(?i)>|greater"))
-            .then(150.0)  # Upper detection limit
+            pl.when(pl.col("value").is_null() & pl.col("comments").is_not_null())
+            .then(
+                # Extract eGFR value from comments using regex
+                pl.col("comments").str.extract(egfr_pattern, 1).str.strip_chars().str.replace(">", "").str.replace("<", "").cast(pl.Float64, strict=False)
+            )
             .when(pl.col("comments").str.contains("(?i)>60|greater.*60"))
             .then(90.0)  # Use midpoint for >60 reporting
             .when(pl.col("value") < 0)
@@ -1038,10 +1082,11 @@ def extract_troponin_t_measures(labs_data: pl.LazyFrame) -> pl.LazyFrame:
         pl.col("charttime").is_not_null()
     )
 
-    # Convert charttime to datetime if it's not already
-    troponin_data = troponin_data.with_columns(
-        pl.col("charttime").str.to_datetime(strict=False).alias("charttime")
-    )
+    # Convert charttime to datetime if it's a string
+    if troponin_data.schema["charttime"] == pl.Utf8:
+        troponin_data = troponin_data.with_columns(
+            pl.col("charttime").str.to_datetime(strict=False).alias("charttime")
+        )
 
     # Sort by hadm_id and charttime to get chronological order
     troponin_sorted = troponin_data.sort(["hadm_id", "charttime"])
@@ -1089,7 +1134,8 @@ def extract_troponin_t_measures(labs_data: pl.LazyFrame) -> pl.LazyFrame:
         pl.col("first_troponin_t").is_not_null()
     ).with_columns([
         pl.lit("first_troponin_t").alias("label"),
-        pl.col("first_troponin_t").alias("value")
+        pl.col("first_troponin_t").alias("value"),
+        pl.lit(51004).alias("itemid").cast(pl.Int64)
     ]).drop("first_troponin_t")
 
     # Second troponin T
@@ -1100,7 +1146,8 @@ def extract_troponin_t_measures(labs_data: pl.LazyFrame) -> pl.LazyFrame:
         pl.col("second_troponin_t").is_not_null()
     ).with_columns([
         pl.lit("second_troponin_t").alias("label"),
-        pl.col("second_troponin_t").alias("value")
+        pl.col("second_troponin_t").alias("value"),
+        pl.lit(51005).alias("itemid").cast(pl.Int64)
     ]).drop("second_troponin_t")
 
     # Third troponin T
@@ -1111,7 +1158,8 @@ def extract_troponin_t_measures(labs_data: pl.LazyFrame) -> pl.LazyFrame:
         pl.col("third_troponin_t").is_not_null()
     ).with_columns([
         pl.lit("third_troponin_t").alias("label"),
-        pl.col("third_troponin_t").alias("value")
+        pl.col("third_troponin_t").alias("value"),
+        pl.lit(51006).alias("itemid").cast(pl.Int64)
     ]).drop("third_troponin_t")
 
     # Troponin T delta
@@ -1122,7 +1170,8 @@ def extract_troponin_t_measures(labs_data: pl.LazyFrame) -> pl.LazyFrame:
         pl.col("troponin_t_delta").is_not_null()
     ).with_columns([
         pl.lit("troponin_t_delta").alias("label"),
-        pl.col("troponin_t_delta").alias("value")
+        pl.col("troponin_t_delta").alias("value"),
+        pl.lit(51007).alias("itemid").cast(pl.Int64)
     ]).drop("troponin_t_delta")
 
     # Combine all feature rows
@@ -1147,20 +1196,23 @@ def extract_troponin_t_measures(labs_data: pl.LazyFrame) -> pl.LazyFrame:
     # Ensure column order matches original
     all_troponin_features = all_troponin_features.select(labs_data.columns)
 
-    # Convert charttime back to String to match original labs_data format
-    all_troponin_features = all_troponin_features.with_columns(
-        pl.col("charttime").cast(pl.Utf8).alias("charttime")
-    )
+    # Match charttime dtype with original labs_data
+    original_charttime_dtype = labs_data.schema["charttime"]
+    if original_charttime_dtype == pl.Utf8:
+        all_troponin_features = all_troponin_features.with_columns(
+            pl.col("charttime").cast(pl.Utf8).alias("charttime")
+        )
+    # If original is datetime, keep it as datetime (already converted earlier)
 
     # Append new troponin feature rows to original labs_data
     enhanced_labs_data = pl.concat([labs_data, all_troponin_features], how="vertical")
 
-    return enhanced_labs_data
 
+    return enhanced_labs_data
 
 def clean_vitals(vitals_data: pl.LazyFrame) -> pl.LazyFrame:
     """
-    Clean extracted vital signs measurements, clipping them to plausible ranges and converting Celsius to Fahrenheit where appropriate.
+    Clean extracted vital signs measurements, clipping them to plausible ranges and converting Fahrenheit to Celsius where appropriate.
 
     Args:
         vitals_data (pl.LazyFrame): Vital signs data.
@@ -1170,7 +1222,7 @@ def clean_vitals(vitals_data: pl.LazyFrame) -> pl.LazyFrame:
     """
 
     # Range definitions
-    celc_conversion = 9 / 5 + 32
+    fahr_to_celc_conversion = (pl.col("value") - 32) * 5 / 9
     celc_range = (25, 45)  # Plausible Celsius range for temperature
     fahr_range = (85, 110)  # Plausible Fahrenheit range for temperature
     sys_bp_range = (70, 220)  # Plausible range for systolic blood pressure
@@ -1179,10 +1231,10 @@ def clean_vitals(vitals_data: pl.LazyFrame) -> pl.LazyFrame:
     oxygen_saturation_range = (70, 100)  # Plausible range for oxygen saturation
     respiratory_rate_range = (5, 60)  # Plausible range for respiratory rate
 
-    # Convert 'Temperature' values in Celsius to Fahrenheit (if in plausible Celsius range)
+    # Convert 'Temperature' values in Fahrenheit to Celsius (if in plausible Fahrenheit range)
     vitals_cleaned = vitals_data.with_columns(
-        pl.when((pl.col("label") == "Temperature") & (pl.col("value") < celc_range[1]) & (pl.col("value") > celc_range[0]))
-        .then(pl.col("value") * celc_conversion)
+        pl.when((pl.col("label") == "Temperature") & (pl.col("value") >= fahr_range[0]) & (pl.col("value") <= fahr_range[1]))
+        .then(fahr_to_celc_conversion)
         .otherwise(pl.col("value"))
         .alias("value")
     )
@@ -1224,8 +1276,13 @@ def clean_vitals(vitals_data: pl.LazyFrame) -> pl.LazyFrame:
     # Drop invalid measurements for temperature only
     vitals_cleaned = vitals_cleaned.filter(
         (pl.col("label") != "Temperature") |
-        ((pl.col("value") >= fahr_range[0]) & (pl.col("value") <= fahr_range[1]))
+        ((pl.col("value") >= celc_range[0]) & (pl.col("value") <= celc_range[1]))
     )
+    vitals_cleaned = vitals_cleaned.filter(
+        (pl.col("label") != "Oxygen saturation") |
+        ((pl.col("value") >= oxygen_saturation_range[0]) & (pl.col("value") <= oxygen_saturation_range[1]))
+    )
+
     return vitals_cleaned
 
 def add_time_elapsed_to_events(

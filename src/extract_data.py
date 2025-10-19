@@ -241,16 +241,6 @@ if __name__ == "__main__":
         admits_last = m4c.read_medications_table(
             mimic4_path, admits_last, use_lazy=args.lazy
         )
-        if isinstance(admits_last, pl.LazyFrame):
-            meds = admits_last.collect(streaming=True).to_pandas()
-        else:
-            meds = admits_last.to_pandas()
-        nums_cols = [col for col in meds.columns if "n_presc" in col]
-        meds = meds[nums_cols].sum(axis=1)
-
-        print(
-            f"MEDICATIONS (EHR):\n\tParsed medication history with median {meds.median()} administered drugs per patient (IQR: {meds.quantile(0.25)} - {meds.quantile(0.75)})."
-        )
 
     if args.verbose:
         print("Completed data extraction.")
